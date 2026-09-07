@@ -41,10 +41,11 @@ export class SkillFactoryService {
 
     // 2. In-Memory Dry-Run Simulation Test
     const simRes = simulateWorkflowExecution(cap.workflowSteps || []);
-    if (!simRes.valid) {
+    const simErrors = Array.isArray(simRes) ? simRes : (simRes.errors || []);
+    if (simErrors.length > 0) {
       return {
         qualified: false,
-        errors: simRes.errors
+        errors: simErrors
       };
     }
 
