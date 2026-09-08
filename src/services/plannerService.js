@@ -154,52 +154,88 @@ export class LocalDeterministicPlannerProvider {
                           g.match(/folder\s+(?:called|named)\s*["`']?([a-zA-Z0-9_\-\.]+)/i) ||
                           g.match(/(?:create|make)\s+([a-zA-Z0-9_\-]+)\s+and/i);
       if (folderMatch) {
-        folderName = folderMatch[1].replace(/["`']/g, '').trim();
+        folderName = folderMatch[1].replace(/["`']/g, '').replace(/[.,;:]+$/, '').trim();
       }
 
-      let fileName = null;
-      let fileContent = 'Default content';
-      const fileMatch = g.match(/(?:create|write|make)\s+(?:a\s+)?file\s+(?:called|named)?\s*["`']?([a-zA-Z0-9_\-\.\/]+)/i) ||
-                        g.match(/file\s+(?:called|named)\s*["`']?([a-zA-Z0-9_\-\.\/]+)/i) ||
-                        g.match(/(?:and|\,)\s*([a-zA-Z0-9_\-\.]+\.[a-zA-Z0-9]+)/i);
-      if (fileMatch) {
-        fileName = fileMatch[1].replace(/["`']/g, '').trim();
-      }
+      // Check for multi-file patterns: filename containing 'content'
+      const multiFileRegex = /([a-zA-Z0-9_\-\.\/]+\.[a-zA-Z0-9]+)\s+containing\s+["`']([^"`']+)["`']/gi;
+      const multiMatches = Array.from(g.matchAll(multiFileRegex));
 
-      const contentMatch = g.match(/containing\s+["`']([^"`']+)["`']/i) ||
-                           g.match(/with\s+content\s+["`']([^"`']+)["`']/i) ||
-                           g.match(/content\s+["`']([^"`']+)["`']/i);
-      if (contentMatch) {
-        fileContent = contentMatch[1];
-      }
+      if (multiMatches.length > 1) {
+        if (folderName) {
+          stepsData.push({
+            title: `Create ${folderName} directory`,
+            description: `Create directory ${folderName}`,
+            action: { type: 'create_directory', path: folderName }
+          });
+        }
 
-      let fullFilePath = fileName || (folderName ? `${folderName}/hello.txt` : 'output.txt');
-      if (folderName && fileName && !fileName.includes('/')) {
-        fullFilePath = `${folderName}/${fileName}`;
-      }
+        const filePaths = [];
+        for (const m of multiMatches) {
+          const rawPath = m[1].replace(/["`']/g, '').trim();
+          const content = m[2];
+          const fullPath = (folderName && !rawPath.includes('/')) ? `${folderName}/${rawPath}` : rawPath;
+          filePaths.push(fullPath);
 
-      if (folderName) {
-        stepsData.push({
-          title: `Create ${folderName} directory`,
-          description: `Create directory ${folderName}`,
-          action: { type: 'create_directory', path: folderName }
-        });
-      }
+          stepsData.push({
+            title: `Create file ${fullPath}`,
+            description: `Write file ${fullPath} containing "${content}"`,
+            action: { type: 'write_file', path: fullPath, content }
+          });
+        }
 
-      if (fileName || folderName) {
-        stepsData.push({
-          title: `Create file ${fullFilePath}`,
-          description: `Write file ${fullFilePath} containing "${fileContent}"`,
-          action: { type: 'write_file', path: fullFilePath, content: fileContent }
-        });
-      }
+        for (const fp of filePaths) {
+          stepsData.push({
+            title: `Verify ${fp} exists`,
+            description: `Read and verify ${fp}`,
+            action: { type: 'read_file', path: fp }
+          });
+        }
+      } else {
+        let fileName = null;
+        let fileContent = 'Default content';
+        const fileMatch = g.match(/(?:create|write|make)\s+(?:a\s+)?file\s+(?:called|named)?\s*["`']?([a-zA-Z0-9_\-\.\/]+)/i) ||
+                          g.match(/file\s+(?:called|named)\s*["`']?([a-zA-Z0-9_\-\.\/]+)/i) ||
+                          g.match(/(?:and|\,)\s*([a-zA-Z0-9_\-\.]+\.[a-zA-Z0-9]+)/i);
+        if (fileMatch) {
+          fileName = fileMatch[1].replace(/["`']/g, '').replace(/[.,;:]+$/, '').trim();
+        }
 
-      if (gLower.includes('verify') || gLower.includes('check') || fileName) {
-        stepsData.push({
-          title: `Verify ${fullFilePath} exists`,
-          description: `Read and verify ${fullFilePath}`,
-          action: { type: 'read_file', path: fullFilePath }
-        });
+        const contentMatch = g.match(/containing\s+["`']([^"`']+)["`']/i) ||
+                             g.match(/with\s+content\s+["`']([^"`']+)["`']/i) ||
+                             g.match(/content\s+["`']([^"`']+)["`']/i);
+        if (contentMatch) {
+          fileContent = contentMatch[1];
+        }
+
+        let fullFilePath = fileName || (folderName ? `${folderName}/hello.txt` : 'output.txt');
+        if (folderName && fileName && !fileName.includes('/')) {
+          fullFilePath = `${folderName}/${fileName}`;
+        }
+
+        if (folderName) {
+          stepsData.push({
+            title: `Create ${folderName} directory`,
+            description: `Create directory ${folderName}`,
+            action: { type: 'create_directory', path: folderName }
+          });
+        }
+
+        if (fileName || folderName) {
+          stepsData.push({
+            title: `Create file ${fullFilePath}`,
+            description: `Write file ${fullFilePath} containing "${fileContent}"`,
+            action: { type: 'write_file', path: fullFilePath, content: fileContent }
+          });
+        }
+
+        if (gLower.includes('verify') || gLower.includes('check') || fileName) {
+          stepsData.push({
+            title: `Verify ${fullFilePath} exists`,
+            description: `Read and verify ${fullFilePath}`,
+            action: { type: 'read_file', path: fullFilePath }
+          });
+        }
       }
 
       if (stepsData.length === 0) {

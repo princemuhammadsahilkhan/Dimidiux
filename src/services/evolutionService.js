@@ -5,7 +5,8 @@ import {
   markObjectiveProcessedForEvolution,
   recordCapabilityUsage,
   getImprovementProposals,
-  PROPOSAL_STATUS
+  PROPOSAL_STATUS,
+  recordFailureEvidence
 } from './capabilityStore.js';
 import {
   matchCapabilities,
@@ -15,11 +16,16 @@ import {
   proposeCapabilityImprovement,
   validateImprovement,
   applyCapabilityImprovement,
-  rollbackCapability
+  promoteRepairCandidate,
+  checkPromotionEligibility,
+  rollbackCapability,
+  evaluateCapabilityInvariants,
+  extractGoalParameters,
+  generateCapabilityRepairCandidate
 } from './capabilityService.js';
 import { extractExperienceFromObjective } from './memoryService.js';
 import { getMemories } from './memoryStore.js';
-import { getObjectives, updateObjectiveEvolutionMetadata } from './objectiveStore.js';
+import { getObjectives, updateObjectiveEvolutionMetadata, setObjectivePlan } from './objectiveStore.js';
 import { plannerService } from './plannerService.js';
 import { evaluationService } from './evaluationService.js';
 
@@ -66,12 +72,30 @@ export class EvolutionService {
 
       const planRes = await plannerService.generatePlan({ goal: goalText });
       if (planRes.success) {
+        let planToUse = planRes.plan;
+        const prefix = adaptedParams.folder || adaptedParams.targetDir;
+        if (prefix) {
+          planToUse = planToUse.map((step) => {
+            const newAction = { ...step.action };
+            if (newAction.path && !newAction.path.startsWith(prefix)) {
+              newAction.path = `${prefix}/${newAction.path}`;
+            }
+            if (newAction.source && !newAction.source.startsWith(prefix)) {
+              newAction.source = `${prefix}/${newAction.source}`;
+            }
+            if (newAction.destination && !newAction.destination.startsWith(prefix)) {
+              newAction.destination = `${prefix}/${newAction.destination}`;
+            }
+            return { ...step, action: newAction };
+          });
+        }
+        setObjectivePlan(objectiveId, planToUse);
         const updatedObj = getObjectives().find((o) => o.id === objectiveId);
         return {
           success: true,
           executionMode: EXECUTION_MODES.NORMAL_PLAN,
           objective: updatedObj,
-          plan: planRes.plan
+          plan: planToUse
         };
       }
       return { success: false, error: planRes.error || 'Planning failed.' };
@@ -79,15 +103,18 @@ export class EvolutionService {
 
     // Milestone 7 Rule: Explicit Capability & Version Pinning (REUSED / EVOLVED groups)
     if (explicitCapabilityId && explicitCapabilityVersion) {
-      updateObjectiveEvolutionMetadata(objectiveId, {
+      const evolutionMetadata = {
         capabilityId: explicitCapabilityId,
         capabilityVersion: explicitCapabilityVersion,
         executionMode: EXECUTION_MODES.REUSED_CAPABILITY,
         reusedCapability: true,
         isExperiment
-      });
+      };
 
-      const reuseRes = await reuseCapability(explicitCapabilityId, objectiveId, adaptedParams, { execute: false });
+      const reuseRes = await reuseCapability(explicitCapabilityId, objectiveId, adaptedParams, {
+        execute: false,
+        evolutionMetadata
+      });
       if (reuseRes.success) {
         const updatedObj = getObjectives().find((o) => o.id === objectiveId);
         return {
@@ -107,7 +134,7 @@ export class EvolutionService {
       const capVersion = cap ? (cap.activeVersion || cap.version || 1) : 1;
 
       // RULE 4 & 5: Capture capabilityId, capabilityVersion, executionMode AT EXECUTION START
-      updateObjectiveEvolutionMetadata(objectiveId, {
+      const evolutionMetadata = {
         capabilityId: matchRes.capabilityId,
         capabilityVersion: capVersion,
         executionMode: EXECUTION_MODES.REUSED_CAPABILITY,
@@ -115,10 +142,13 @@ export class EvolutionService {
         matchedConfidence: matchRes.confidence,
         matchedReasons: matchRes.reasons,
         isExperiment
-      });
+      };
 
-      // Reuse capability (adapts params & binds plan under new objectiveId)
-      const reuseRes = await reuseCapability(matchRes.capabilityId, objectiveId, matchRes.adaptedParams, { execute: false });
+      // Reuse capability (adapts params & binds plan with evolution metadata in single atomic write)
+      const reuseRes = await reuseCapability(matchRes.capabilityId, objectiveId, matchRes.adaptedParams, {
+        execute: false,
+        evolutionMetadata
+      });
       if (reuseRes.success) {
         const updatedObj = getObjectives().find((o) => o.id === objectiveId);
         return {
@@ -142,6 +172,7 @@ export class EvolutionService {
 
     const planRes = await plannerService.generatePlan({ goal: goalText });
     if (planRes.success) {
+      setObjectivePlan(objectiveId, planRes.plan);
       const updatedObj = getObjectives().find((o) => o.id === objectiveId);
       return {
         success: true,
@@ -199,6 +230,44 @@ export class EvolutionService {
 
       if (reusedCapId) {
         recordCapabilityUsage(reusedCapId, isSuccess, capVersion);
+
+        // Stage 2 Self-Healing: Invariant Check, Failure Evidence Capture & Repair Candidate Generation
+        try {
+          const targetParams = extractGoalParameters(objective.goal);
+          const invEval = await evaluateCapabilityInvariants(reusedCapId, {
+            rootPath: objective.root || undefined,
+            targetParams,
+            version: capVersion
+          });
+
+          if (invEval && !invEval.success && Array.isArray(invEval.results)) {
+            const failedInvariants = invEval.results.filter((r) => !r.passed);
+            for (const failedInv of failedInvariants) {
+              const precedingStep = Array.isArray(objective.completedSteps) && objective.completedSteps.length > 0
+                ? objective.completedSteps[objective.completedSteps.length - 1]
+                : (Array.isArray(objective.plan) && objective.plan.length > 0 ? objective.plan[0] : null);
+
+              const evidence = recordFailureEvidence({
+                capabilityId: reusedCapId,
+                capabilityVersion: capVersion,
+                objectiveId: objective.id,
+                failedInvariantId: failedInv.id,
+                failedInvariantType: failedInv.type,
+                targetPath: failedInv.targetPath,
+                expected: failedInv.expected,
+                actual: failedInv.actual,
+                precedingStep,
+                targetParams,
+                timestamp: new Date().toISOString()
+              });
+
+              // Generate localized NON-ACTIVE repair candidate
+              generateCapabilityRepairCandidate(evidence.id);
+            }
+          }
+        } catch (invErr) {
+          console.error('EvolutionService: Failure evidence capture / repair generation failed:', invErr);
+        }
       }
 
       // Step B2: Record Objective Evaluation (Milestone 6)
@@ -286,11 +355,19 @@ export class EvolutionService {
   }
 
   /**
-   * 4. Controlled Improvement Application (Rule 9)
+   * 4. Controlled Improvement Application / Stage 4 Candidate Promotion
    * Must be called explicitly for controlled transition (PROPOSED -> VALIDATED -> CONTROLLED APPLY -> NEW VERSION)
    */
-  applyValidatedImprovement(proposalId) {
-    return applyCapabilityImprovement(proposalId);
+  checkPromotionEligibility(proposalIdOrObj, options = {}) {
+    return checkPromotionEligibility(proposalIdOrObj, options);
+  }
+
+  promoteValidatedCandidate(proposalIdOrObj, options = {}) {
+    return promoteRepairCandidate(proposalIdOrObj, options);
+  }
+
+  applyValidatedImprovement(proposalId, options = {}) {
+    return promoteRepairCandidate(proposalId, options);
   }
 
   /**

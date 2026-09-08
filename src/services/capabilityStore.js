@@ -6,6 +6,62 @@ export const CAPABILITY_STATUS = {
   REJECTED: 'REJECTED'
 };
 
+export const INVARIANT_TYPES = {
+  DIRECTORY_EXISTS: 'directory_exists',
+  FILE_EXISTS: 'file_exists',
+  EXACT_FILE_CONTENT: 'exact_file_content',
+  PATH_RELATIONSHIP: 'path_relationship'
+};
+
+/**
+ * Validates a single post-condition invariant schema
+ */
+export function validateInvariantSchema(invariant) {
+  if (!invariant || typeof invariant !== 'object') {
+    return { valid: false, error: 'Invariant must be an object.' };
+  }
+  if (!invariant.id || typeof invariant.id !== 'string') {
+    return { valid: false, error: 'Invariant missing valid string id.' };
+  }
+  if (!invariant.type || typeof invariant.type !== 'string') {
+    return { valid: false, error: 'Invariant missing valid string type.' };
+  }
+  if (!Object.values(INVARIANT_TYPES).includes(invariant.type)) {
+    return { valid: false, error: `Unsupported invariant type "${invariant.type}".` };
+  }
+  if (!invariant.targetPath || typeof invariant.targetPath !== 'string' || !invariant.targetPath.trim()) {
+    return { valid: false, error: 'Invariant targetPath must be a non-empty string.' };
+  }
+
+  // Security Check 1: Traversal and System Path Escapes
+  const targetStr = invariant.targetPath.trim();
+  if (targetStr.includes('../') || targetStr.includes('..\\') || targetStr.includes('/../')) {
+    return { valid: false, error: `Security Error: Traversal attempt in invariant path "${targetStr}".` };
+  }
+  if (targetStr.startsWith('/etc/') || targetStr.startsWith('/sys/') || targetStr.startsWith('/proc/')) {
+    return { valid: false, error: `Security Error: System path escape in invariant path "${targetStr}".` };
+  }
+
+  // Type-specific validation rules
+  if (invariant.type === INVARIANT_TYPES.EXACT_FILE_CONTENT) {
+    if (typeof invariant.expectedContent !== 'string') {
+      return { valid: false, error: 'exact_file_content invariant requires string expectedContent.' };
+    }
+  }
+
+  if (invariant.type === INVARIANT_TYPES.PATH_RELATIONSHIP) {
+    if (!invariant.parentPath || typeof invariant.parentPath !== 'string' || !invariant.parentPath.trim()) {
+      return { valid: false, error: 'path_relationship invariant requires non-empty parentPath string.' };
+    }
+    const parentStr = invariant.parentPath.trim();
+    if (parentStr.includes('../') || parentStr.includes('..\\') || parentStr.includes('/../')) {
+      return { valid: false, error: `Security Error: Traversal attempt in invariant parentPath "${parentStr}".` };
+    }
+  }
+
+  return { valid: true };
+}
+
 /**
  * Validates a capability candidate schema
  */
@@ -34,7 +90,46 @@ export function validateCapabilitySchema(candidate) {
   if (typeof candidate.evidenceCount !== 'number' || candidate.evidenceCount < 2) {
     return { valid: false, error: `evidenceCount must be a number >= 2 (got ${candidate.evidenceCount}).` };
   }
+
+  // Validate optional capability post-condition invariants
+  if (candidate.invariants !== undefined) {
+    if (!Array.isArray(candidate.invariants)) {
+      return { valid: false, error: 'Capability invariants must be an array.' };
+    }
+    for (let i = 0; i < candidate.invariants.length; i++) {
+      const invCheck = validateInvariantSchema(candidate.invariants[i]);
+      if (!invCheck.valid) {
+        return { valid: false, error: `Invariant at index ${i} invalid: ${invCheck.error}` };
+      }
+    }
+  }
+
   return { valid: true };
+}
+
+/**
+ * Resolves version-specific invariants for a given capability
+ */
+export function getCapabilityInvariants(capabilityOrId, version = null) {
+  let cap = null;
+  if (typeof capabilityOrId === 'string') {
+    cap = getCapabilities().find((c) => c.id === capabilityOrId);
+  } else if (capabilityOrId && typeof capabilityOrId === 'object') {
+    cap = capabilityOrId;
+  }
+  if (!cap) return [];
+
+  const targetVer = version || cap.activeVersion || cap.version || 1;
+  if (cap.versionStats && cap.versionStats[targetVer] && Array.isArray(cap.versionStats[targetVer].invariants)) {
+    return cap.versionStats[targetVer].invariants;
+  }
+  if (cap.versionHistory && Array.isArray(cap.versionHistory)) {
+    const vHist = cap.versionHistory.find((vh) => vh.version === targetVer);
+    if (vHist && Array.isArray(vHist.invariants)) {
+      return vHist.invariants;
+    }
+  }
+  return Array.isArray(cap.invariants) ? cap.invariants : [];
 }
 
 /**
@@ -125,6 +220,7 @@ export function createCapabilityCandidate(data) {
     description: (data.description || '').trim(),
     sourceExperienceIds: Array.isArray(data.sourceExperienceIds) ? data.sourceExperienceIds : [],
     workflowSteps: data.workflowSteps,
+    invariants: Array.isArray(data.invariants) ? data.invariants : [],
     status: CAPABILITY_STATUS.CANDIDATE, // MUST initially be CANDIDATE
     evidenceCount: data.evidenceCount || 2,
     version: 1,
@@ -351,4 +447,61 @@ export function updateImprovementProposal(id, updates) {
     saveImprovementProposals(updatedList);
   }
   return updatedTarget;
+}
+
+// ----------------------------------------------------
+// Failure Evidence Storage (Self-Healing Stage 2)
+// ----------------------------------------------------
+
+const FAILURE_EVIDENCE_STORAGE_KEY = 'evo_capability_failure_evidence';
+
+export function getFailureEvidences(capabilityId = null) {
+  try {
+    const data = localStorage.getItem(FAILURE_EVIDENCE_STORAGE_KEY);
+    const list = data ? JSON.parse(data) : [];
+    if (capabilityId) {
+      return list.filter((e) => e.capabilityId === capabilityId);
+    }
+    return list;
+  } catch (e) {
+    console.error('Failed to load failure evidence from localStorage:', e);
+    return [];
+  }
+}
+
+export function saveFailureEvidences(evidences) {
+  try {
+    localStorage.setItem(FAILURE_EVIDENCE_STORAGE_KEY, JSON.stringify(evidences));
+  } catch (e) {
+    console.error('Failed to save failure evidence to localStorage:', e);
+  }
+}
+
+export function recordFailureEvidence(data) {
+  const now = new Date().toISOString();
+  const newEvidence = {
+    id: `fev_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+    capabilityId: data.capabilityId,
+    capabilityVersion: data.capabilityVersion || 1,
+    objectiveId: data.objectiveId || null,
+    failedInvariantId: data.failedInvariantId || null,
+    failedInvariantType: data.failedInvariantType || null,
+    targetPath: data.targetPath || null,
+    expected: data.expected !== undefined ? data.expected : null,
+    actual: data.actual !== undefined ? data.actual : null,
+    precedingStep: data.precedingStep || null,
+    targetParams: data.targetParams || {},
+    timestamp: data.timestamp || now,
+    createdAt: now
+  };
+
+  const current = getFailureEvidences();
+  const updated = [newEvidence, ...current];
+  saveFailureEvidences(updated);
+  return newEvidence;
+}
+
+export function getFailureEvidenceById(id) {
+  const list = getFailureEvidences();
+  return list.find((e) => e.id === id) || null;
 }

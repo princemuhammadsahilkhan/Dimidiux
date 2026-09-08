@@ -59,7 +59,7 @@ export function updateObjectiveStatus(id, status, currentStep) {
   return updated.find((o) => o.id === id);
 }
 
-export function setObjectivePlan(id, planArray) {
+export function setObjectivePlan(id, planArray, evolutionData = null) {
   // Strict schema validation before persistence
   const validation = validatePlanSchema({ plan: planArray });
   if (!validation.valid) {
@@ -70,17 +70,28 @@ export function setObjectivePlan(id, planArray) {
   const objectives = getObjectives();
   const updated = objectives.map((obj) => {
     if (obj.id === id) {
-      return {
+      const updatedObj = {
         ...obj,
         status: 'PLANNED',
         plan: planArray,
         currentStep: 'Plan created. Ready to begin.'
       };
+      if (evolutionData) {
+        updatedObj.evolution = {
+          ...(obj.evolution || {}),
+          ...evolutionData
+        };
+      }
+      return updatedObj;
     }
     return obj;
   });
   saveObjectives(updated);
   return updated.find((o) => o.id === id);
+}
+
+export function setObjectivePlanAndEvolutionMetadata(id, planArray, evolutionData) {
+  return setObjectivePlan(id, planArray, evolutionData);
 }
 
 export function setObjectivePlanningFailed(id, errorMsg) {

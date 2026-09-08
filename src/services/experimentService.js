@@ -235,8 +235,8 @@ export class ExperimentService {
       explicitCapabilityId,
       explicitCapabilityVersion,
       adaptedParams: {
-        folder: workspaceSubdir,
-        targetDir: workspaceSubdir
+        folder: `experiments/${experimentId}/${runId}`,
+        targetDir: `experiments/${experimentId}/${runId}`
       }
     });
 
