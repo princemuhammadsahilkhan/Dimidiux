@@ -3,6 +3,28 @@ import { validatePlanSchema } from './plannerService.js';
 const STORAGE_KEY = 'evo_objectives';
 const ACTIVE_ID_KEY = 'evo_active_objective_id';
 
+const browserSubscribers = new Set();
+
+export function subscribeObjectiveUpdates(callback) {
+  if (typeof callback === 'function') {
+    browserSubscribers.add(callback);
+  }
+  return () => {
+    browserSubscribers.delete(callback);
+  };
+}
+
+export function notifyObjectiveSubscribers(updatedObj = null) {
+  const activeObj = updatedObj || getActiveObjective();
+  for (const cb of browserSubscribers) {
+    try {
+      cb(activeObj);
+    } catch (e) {
+      console.error('Error in objective update subscriber:', e);
+    }
+  }
+}
+
 export function getObjectives() {
   try {
     const data = localStorage.getItem(STORAGE_KEY);
@@ -16,6 +38,7 @@ export function getObjectives() {
 export function saveObjectives(objectives) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(objectives));
+    notifyObjectiveSubscribers();
   } catch (e) {
     console.error('Failed to save objectives to localStorage:', e);
   }
@@ -47,11 +70,16 @@ export function updateObjectiveStatus(id, status, currentStep) {
   const objectives = getObjectives();
   const updated = objectives.map((obj) => {
     if (obj.id === id) {
-      return {
+      const isNewExecutionRun = status === 'IN_PROGRESS' && (obj.status === 'PLANNED' || obj.status === 'PENDING' || obj.status === 'FAILED' || obj.status === 'COMPLETED' || !obj.executionStartedAt);
+      const updatedObj = {
         ...obj,
         status,
         currentStep: currentStep !== undefined ? currentStep : obj.currentStep
       };
+      if (isNewExecutionRun) {
+        updatedObj.executionStartedAt = new Date().toISOString();
+      }
+      return updatedObj;
     }
     return obj;
   });
@@ -120,6 +148,7 @@ export function setActiveObjectiveId(id) {
   } else {
     localStorage.removeItem(ACTIVE_ID_KEY);
   }
+  notifyObjectiveSubscribers();
 }
 
 export function updateObjectiveEvolutionMetadata(id, evolutionData) {

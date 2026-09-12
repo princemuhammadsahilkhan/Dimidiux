@@ -129,6 +129,7 @@ function performStartupRecovery() {
 }
 
 function createWindow() {
+  globalThis.__electronBrowserWindow = BrowserWindow;
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -675,6 +676,364 @@ function setupIpcHandlers() {
       throw new Error('Invalid IPC parameter: candidateId must be a valid string.');
     }
     return skillFactoryService.promoteCandidateSkill(candidateId, options || {});
+  });
+
+  // Stage 6A Runtime Learning & Self-Observation Loop IPC Handlers
+  ipcMain.handle('get-runtime-learning-records', (_event, filter) => {
+    return evolutionService.getRuntimeLearningRecords(filter);
+  });
+
+  ipcMain.handle('get-runtime-learning-record-by-objective', (_event, objectiveId) => {
+    if (!isValidString(objectiveId, 100)) {
+      throw new Error('Invalid IPC parameter: objectiveId must be a valid string.');
+    }
+    return evolutionService.getRuntimeLearningRecordByObjective(objectiveId);
+  });
+
+  ipcMain.handle('get-system-learning-overview', () => {
+    return evolutionService.getSystemLearningOverview();
+  });
+
+  // Stage 6B Supervised Self-Code Improvement & Versioning IPC Handlers
+  ipcMain.handle('get-self-code-proposals', () => {
+    return evolutionService.getSelfCodeProposals();
+  });
+
+  ipcMain.handle('approve-self-code-proposal', (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Invalid IPC parameter: payload must be an object.');
+    }
+    const { proposalId, options } = payload;
+    if (!isValidString(proposalId, 100)) {
+      throw new Error('Invalid IPC parameter: proposalId must be a valid string.');
+    }
+    return evolutionService.approveSelfCodeProposal(proposalId, options || {});
+  });
+
+  ipcMain.handle('reject-self-code-proposal', (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Invalid IPC parameter: payload must be an object.');
+    }
+    const { proposalId, reason } = payload;
+    if (!isValidString(proposalId, 100)) {
+      throw new Error('Invalid IPC parameter: proposalId must be a valid string.');
+    }
+    return evolutionService.rejectSelfCodeProposal(proposalId, reason || 'Operator rejected proposal');
+  });
+
+  ipcMain.handle('get-self-code-version-state', () => {
+    return evolutionService.getSelfCodeVersionState();
+  });
+
+  ipcMain.handle('rollback-self-code-version', (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Invalid IPC parameter: payload must be an object.');
+    }
+    const { versionId, reason } = payload;
+    if (!isValidString(versionId, 100)) {
+      throw new Error('Invalid IPC parameter: versionId must be a valid string.');
+    }
+    return evolutionService.rollbackSelfCodeVersion(versionId, reason || 'Manual operator rollback');
+  });
+
+  // Stage 7A Desktop Observation IPC Handlers
+  ipcMain.handle('get-desktop-observation', (_event, options) => {
+    return evolutionService.getDesktopObservation(options || {});
+  });
+
+  ipcMain.handle('get-active-application', () => {
+    return evolutionService.getActiveApplication();
+  });
+
+  ipcMain.handle('get-open-windows', () => {
+    return evolutionService.getOpenWindows();
+  });
+
+  ipcMain.handle('get-desktop-snapshot', () => {
+    return evolutionService.getDesktopSnapshot();
+  });
+
+  ipcMain.handle('get-application-state', (_event, appId) => {
+    return evolutionService.getApplicationState(appId);
+  });
+
+  // Stage 7B Controlled Single-Click Computer Interaction IPC Handlers
+  ipcMain.handle('get-pending-click-requests', () => {
+    return evolutionService.getPendingClickRequests();
+  });
+
+  ipcMain.handle('request-mouse-click', (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Invalid IPC parameter: payload must be an object.');
+    }
+    const { target, options } = payload;
+    return evolutionService.requestMouseClick(target, options || {});
+  });
+
+function sanitizeIpcOptions(opts) {
+  const sanitized = typeof opts === 'object' && opts !== null ? { ...opts } : {};
+  delete sanitized.mock;
+  sanitized.mock = false;
+  return sanitized;
+}
+
+  ipcMain.handle('approve-mouse-click', (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Invalid IPC parameter: payload must be an object.');
+    }
+    const { interactionId, options } = payload;
+    if (!isValidString(interactionId, 100)) {
+      throw new Error('Invalid IPC parameter: interactionId must be a valid string.');
+    }
+    return evolutionService.approveMouseClick(interactionId, sanitizeIpcOptions(options));
+  });
+
+  ipcMain.handle('cancel-mouse-click', (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Invalid IPC parameter: payload must be an object.');
+    }
+    const { interactionId, reason } = payload;
+    if (!isValidString(interactionId, 100)) {
+      throw new Error('Invalid IPC parameter: interactionId must be a valid string.');
+    }
+    return evolutionService.cancelMouseClick(interactionId, reason || 'Operator cancelled click');
+  });
+
+  // Stage 7C Visual Target Understanding IPC Handlers
+  ipcMain.handle('identify-clickable-target', (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Invalid IPC parameter: payload must be an object.');
+    }
+    const { observation, objective, options } = payload;
+    return evolutionService.identifyClickableTarget(observation, objective, options || {});
+  });
+
+  ipcMain.handle('validate-target-proposal', (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Invalid IPC parameter: payload must be an object.');
+    }
+    const { proposal, observation } = payload;
+    return evolutionService.validateTargetProposal(proposal, observation);
+  });
+
+  ipcMain.handle('create-click-proposal-from-target', (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Invalid IPC parameter: payload must be an object.');
+    }
+    const { visualProposal, options } = payload;
+    return evolutionService.createClickProposalFromTarget(visualProposal, options || {});
+  });
+
+  ipcMain.handle('get-visual-target-proposals', () => {
+    return evolutionService.getVisualTargetProposals();
+  });
+
+  // Stage 7D Controlled Application Launch IPC Handlers
+  ipcMain.handle('list-allowed-applications', () => {
+    return evolutionService.listAllowedApplications();
+  });
+
+  ipcMain.handle('request-application-launch', (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Invalid IPC parameter: payload must be an object.');
+    }
+    const { applicationId, options } = payload;
+    return evolutionService.requestApplicationLaunch(applicationId, options || {});
+  });
+
+  ipcMain.handle('approve-application-launch', (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Invalid IPC parameter: payload must be an object.');
+    }
+    const { requestId, options } = payload;
+    if (!isValidString(requestId, 100)) {
+      throw new Error('Invalid IPC parameter: requestId must be a valid string.');
+    }
+    return evolutionService.approveApplicationLaunch(requestId, sanitizeIpcOptions(options));
+  });
+
+  ipcMain.handle('cancel-application-launch', (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Invalid IPC parameter: payload must be an object.');
+    }
+    const { requestId, reason } = payload;
+    if (!isValidString(requestId, 100)) {
+      throw new Error('Invalid IPC parameter: requestId must be a valid string.');
+    }
+    return evolutionService.cancelApplicationLaunch(requestId, reason || 'Operator cancelled launch');
+  });
+
+  ipcMain.handle('verify-application-launch', (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Invalid IPC parameter: payload must be an object.');
+    }
+    const { applicationId, observation } = payload;
+    return evolutionService.verifyApplicationLaunch(applicationId, observation);
+  });
+
+  ipcMain.handle('get-pending-launch-requests', () => {
+    return evolutionService.getPendingLaunchRequests();
+  });
+
+  // Stage 7E Controlled Supervised Text Input IPC Handlers
+  ipcMain.handle('request-text-input', (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Invalid IPC parameter: payload must be an object.');
+    }
+    const { target, text, options } = payload;
+    return evolutionService.requestTextInput(target, text, options || {});
+  });
+
+  ipcMain.handle('approve-text-input', (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Invalid IPC parameter: payload must be an object.');
+    }
+    const { requestId, options } = payload;
+    if (!isValidString(requestId, 100)) {
+      throw new Error('Invalid IPC parameter: requestId must be a valid string.');
+    }
+    return evolutionService.approveTextInput(requestId, sanitizeIpcOptions(options));
+  });
+
+  ipcMain.handle('cancel-text-input', (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Invalid IPC parameter: payload must be an object.');
+    }
+    const { requestId, reason } = payload;
+    if (!isValidString(requestId, 100)) {
+      throw new Error('Invalid IPC parameter: requestId must be a valid string.');
+    }
+    return evolutionService.cancelTextInput(requestId, reason || 'Operator cancelled text input');
+  });
+
+  ipcMain.handle('get-pending-text-input-requests', () => {
+    return evolutionService.getPendingTextInputRequests();
+  });
+
+  // Stage 7F Controlled Multi-Step Computer Task IPC Handlers
+  ipcMain.handle('create-computer-task', (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Invalid IPC parameter: payload must be an object.');
+    }
+    const { objective, options } = payload;
+    if (!isValidString(objective, 1000)) {
+      throw new Error('Invalid IPC parameter: objective must be a non-empty string.');
+    }
+    return evolutionService.createComputerTask(objective, options || {});
+  });
+
+  ipcMain.handle('get-computer-task', (_event, taskId) => {
+    if (!isValidString(taskId, 100)) {
+      throw new Error('Invalid IPC parameter: taskId must be a valid string.');
+    }
+    return evolutionService.getComputerTask(taskId);
+  });
+
+  ipcMain.handle('get-pending-computer-actions', (_event, taskId) => {
+    return evolutionService.getPendingComputerActions(taskId || null);
+  });
+
+  ipcMain.handle('approve-computer-action', (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Invalid IPC parameter: payload must be an object.');
+    }
+    const { taskId, actionId, options } = payload;
+    if (!isValidString(taskId, 100) || !isValidString(actionId, 100)) {
+      throw new Error('Invalid IPC parameter: taskId and actionId must be valid strings.');
+    }
+    return evolutionService.approveComputerAction(taskId, actionId, sanitizeIpcOptions(options));
+  });
+
+  ipcMain.handle('cancel-computer-task', (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Invalid IPC parameter: payload must be an object.');
+    }
+    const { taskId, reason } = payload;
+    if (!isValidString(taskId, 100)) {
+      throw new Error('Invalid IPC parameter: taskId must be a valid string.');
+    }
+    return evolutionService.cancelComputerTask(taskId, reason || 'Operator cancelled task');
+  });
+
+  ipcMain.handle('resume-computer-task', (_event, taskId) => {
+    if (!isValidString(taskId, 100)) {
+      throw new Error('Invalid IPC parameter: taskId must be a valid string.');
+    }
+    return evolutionService.resumeComputerTask(taskId);
+  });
+
+  ipcMain.handle('verify-computer-task', (_event, taskId) => {
+    if (!isValidString(taskId, 100)) {
+      throw new Error('Invalid IPC parameter: taskId must be a valid string.');
+    }
+    return evolutionService.verifyComputerTask(taskId);
+  });
+
+  // Stage 8A Scoped Computer Autonomy IPC Handlers
+  ipcMain.handle('request-autonomy-scope', (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Invalid IPC parameter: payload must be an object.');
+    }
+    const { taskId, details } = payload;
+    if (!isValidString(taskId, 100)) {
+      throw new Error('Invalid IPC parameter: taskId must be a valid string.');
+    }
+    return evolutionService.requestAutonomyScope(taskId, details || {});
+  });
+
+  ipcMain.handle('approve-autonomy-scope', (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Invalid IPC parameter: payload must be an object.');
+    }
+    const { scopeId, options } = payload;
+    if (!isValidString(scopeId, 100)) {
+      throw new Error('Invalid IPC parameter: scopeId must be a valid string.');
+    }
+    return evolutionService.approveAutonomyScope(scopeId, sanitizeIpcOptions(options));
+  });
+
+  ipcMain.handle('revoke-autonomy-scope', (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Invalid IPC parameter: payload must be an object.');
+    }
+    const { scopeId, reason } = payload;
+    if (!isValidString(scopeId, 100)) {
+      throw new Error('Invalid IPC parameter: scopeId must be a valid string.');
+    }
+    return evolutionService.revokeAutonomyScope(scopeId, reason || 'Operator revocation');
+  });
+
+  ipcMain.handle('get-autonomy-scope', (_event, identifier) => {
+    return evolutionService.getAutonomyScope(identifier || null);
+  });
+
+  ipcMain.handle('get-autonomy-scope-history', () => {
+    return evolutionService.getAutonomyScopeHistory();
+  });
+
+  // Stage 8C Autonomy Scope Planner IPC Handlers
+  ipcMain.handle('plan-autonomy-scope', (_event, taskOrObjective) => {
+    return evolutionService.planAutonomyScope(taskOrObjective);
+  });
+
+  ipcMain.handle('validate-planned-scope', (_event, payload) => {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Invalid IPC parameter: payload must be an object.');
+    }
+    const { scope, taskOrObjective } = payload;
+    return evolutionService.validatePlannedScope(scope, taskOrObjective);
+  });
+
+  // Stage 8D Recovery IPC Handlers
+  ipcMain.handle('recover-computer-task', (_event, taskId) => {
+    if (!isValidString(taskId, 100)) {
+      throw new Error('Invalid IPC parameter: taskId must be a valid string.');
+    }
+    return evolutionService.recoverComputerTask(taskId);
+  });
+
+  ipcMain.handle('get-recovery-history', (_event, taskId) => {
+    return evolutionService.getRecoveryHistory(taskId || null);
   });
 }
 

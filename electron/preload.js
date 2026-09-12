@@ -69,6 +69,73 @@ contextBridge.exposeInMainWorld('evoAPI', {
   getSystemInfo: () => ipcRenderer.invoke('get-system-info'),
   promoteCandidateSkill: (payload) => ipcRenderer.invoke('promote-candidate-skill', payload),
 
+  // Stage 6A Runtime Learning IPC methods
+  getRuntimeLearningRecords: (filter) => ipcRenderer.invoke('get-runtime-learning-records', filter),
+  getRuntimeLearningRecordByObjective: (objectiveId) => ipcRenderer.invoke('get-runtime-learning-record-by-objective', objectiveId),
+  getSystemLearningOverview: () => ipcRenderer.invoke('get-system-learning-overview'),
+
+  // Stage 6B Supervised Self-Code Improvement & Versioning IPC methods
+  getSelfCodeProposals: () => ipcRenderer.invoke('get-self-code-proposals'),
+  approveSelfCodeProposal: (payload) => ipcRenderer.invoke('approve-self-code-proposal', payload),
+  rejectSelfCodeProposal: (payload) => ipcRenderer.invoke('reject-self-code-proposal', payload),
+  getSelfCodeVersionState: () => ipcRenderer.invoke('get-self-code-version-state'),
+  rollbackSelfCodeVersion: (payload) => ipcRenderer.invoke('rollback-self-code-version', payload),
+
+  // Stage 7A Controlled Desktop Observation IPC methods
+  getDesktopObservation: (options) => ipcRenderer.invoke('get-desktop-observation', options),
+  getActiveApplication: () => ipcRenderer.invoke('get-active-application'),
+  getOpenWindows: () => ipcRenderer.invoke('get-open-windows'),
+  getDesktopSnapshot: () => ipcRenderer.invoke('get-desktop-snapshot'),
+  getApplicationState: (appId) => ipcRenderer.invoke('get-application-state', appId),
+
+  // Stage 7B Controlled Single-Click Computer Interaction IPC methods
+  getPendingClickRequests: () => ipcRenderer.invoke('get-pending-click-requests'),
+  requestMouseClick: (target, options) => ipcRenderer.invoke('request-mouse-click', { target, options }),
+  approveMouseClick: (interactionId, options) => ipcRenderer.invoke('approve-mouse-click', { interactionId, options }),
+  cancelMouseClick: (interactionId, reason) => ipcRenderer.invoke('cancel-mouse-click', { interactionId, reason }),
+
+  // Stage 7C Visual Target Understanding IPC methods
+  identifyClickableTarget: (observation, objective, options) => ipcRenderer.invoke('identify-clickable-target', { observation, objective, options }),
+  validateTargetProposal: (proposal, observation) => ipcRenderer.invoke('validate-target-proposal', { proposal, observation }),
+  createClickProposalFromTarget: (visualProposal, options) => ipcRenderer.invoke('create-click-proposal-from-target', { visualProposal, options }),
+  getVisualTargetProposals: () => ipcRenderer.invoke('get-visual-target-proposals'),
+
+  // Stage 7D Controlled Application Launch IPC methods
+  listAllowedApplications: () => ipcRenderer.invoke('list-allowed-applications'),
+  requestApplicationLaunch: (applicationId, options) => ipcRenderer.invoke('request-application-launch', { applicationId, options }),
+  approveApplicationLaunch: (requestId, options) => ipcRenderer.invoke('approve-application-launch', { requestId, options }),
+  cancelApplicationLaunch: (requestId, reason) => ipcRenderer.invoke('cancel-application-launch', { requestId, reason }),
+  verifyApplicationLaunch: (applicationId, observation) => ipcRenderer.invoke('verify-application-launch', { applicationId, observation }),
+  getPendingLaunchRequests: () => ipcRenderer.invoke('get-pending-launch-requests'),
+
+  // Stage 7E Controlled Supervised Text Input IPC methods
+  requestTextInput: (target, text, options) => ipcRenderer.invoke('request-text-input', { target, text, options }),
+  approveTextInput: (requestId, options) => ipcRenderer.invoke('approve-text-input', { requestId, options }),
+  cancelTextInput: (requestId, reason) => ipcRenderer.invoke('cancel-text-input', { requestId, reason }),
+  getPendingTextInputRequests: () => ipcRenderer.invoke('get-pending-text-input-requests'),
+
+  // Stage 7F Controlled Multi-Step Computer Task IPC methods
+  createComputerTask: (objective, options) => ipcRenderer.invoke('create-computer-task', { objective, options }),
+  getComputerTask: (taskId) => ipcRenderer.invoke('get-computer-task', taskId),
+  getPendingComputerActions: (taskId) => ipcRenderer.invoke('get-pending-computer-actions', taskId),
+  approveComputerAction: (taskId, actionId, options) => ipcRenderer.invoke('approve-computer-action', { taskId, actionId, options }),
+  cancelComputerTask: (taskId, reason) => ipcRenderer.invoke('cancel-computer-task', { taskId, reason }),
+  resumeComputerTask: (taskId) => ipcRenderer.invoke('resume-computer-task', taskId),
+  verifyComputerTask: (taskId) => ipcRenderer.invoke('verify-computer-task', taskId),
+
+  // Stage 8A/8C Scoped Computer Autonomy IPC methods
+  requestAutonomyScope: (taskId, details) => ipcRenderer.invoke('request-autonomy-scope', { taskId, details }),
+  approveAutonomyScope: (scopeId, options) => ipcRenderer.invoke('approve-autonomy-scope', { scopeId, options }),
+  revokeAutonomyScope: (scopeId, reason) => ipcRenderer.invoke('revoke-autonomy-scope', { scopeId, reason }),
+  getAutonomyScope: (identifier) => ipcRenderer.invoke('get-autonomy-scope', identifier),
+  getAutonomyScopeHistory: () => ipcRenderer.invoke('get-autonomy-scope-history'),
+  planAutonomyScope: (taskOrObjective) => ipcRenderer.invoke('plan-autonomy-scope', taskOrObjective),
+  validatePlannedScope: (scope, taskOrObjective) => ipcRenderer.invoke('validate-planned-scope', { scope, taskOrObjective }),
+
+  // Stage 8D Intelligent Recovery IPC methods
+  recoverComputerTask: (taskId) => ipcRenderer.invoke('recover-computer-task', taskId),
+  getRecoveryHistory: (taskId) => ipcRenderer.invoke('get-recovery-history', taskId),
+
   onObjectiveUpdated: (callback) => {
     const listener = (_event, data) => callback(data);
     ipcRenderer.on('objective-updated', listener);

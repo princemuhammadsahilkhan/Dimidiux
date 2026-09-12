@@ -11,10 +11,23 @@ const virtualWorkspace = {
   '/home/kali/Desktop/Evo/workspace/Research': { type: 'directory' },
   '/home/kali/Desktop/Evo/workspace/Research/paper1.txt': { type: 'file', content: 'Paper 1: Autonomous Agent Architecture', size: 38 },
   '/home/kali/Desktop/Evo/workspace/Research/paper2.txt': { type: 'file', content: 'Paper 2: Deterministic Planning Systems', size: 39 },
+  '/home/kali/Desktop': { type: 'directory' }
 };
 
 function normalizePath(p) {
   return p.replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/$/, '');
+}
+
+export function isDesktopTarget(requestedPath) {
+  if (!requestedPath || typeof requestedPath !== 'string') return false;
+  const normDesktopRoot = fsConfig.desktopRoot ? normalizePath(fsConfig.desktopRoot) : '/home/kali/Desktop';
+  const rawSub = requestedPath.trim();
+  return (
+    rawSub === 'Desktop' ||
+    rawSub === 'Desktop/' ||
+    rawSub.startsWith('Desktop/') ||
+    rawSub.startsWith(normDesktopRoot)
+  );
 }
 
 /**
@@ -30,6 +43,7 @@ export function resolveSafePath(requestedPath, root = fsConfig.workspaceRoot) {
   }
 
   const normRoot = normalizePath(root);
+  const normDesktopRoot = fsConfig.desktopRoot ? normalizePath(fsConfig.desktopRoot) : '/home/kali/Desktop';
   const rawSub = requestedPath.trim();
 
   const segments = rawSub.split('/');
@@ -37,7 +51,28 @@ export function resolveSafePath(requestedPath, root = fsConfig.workspaceRoot) {
     throw new Error(`Security Error: Traversal attempt detected in path "${requestedPath}".`);
   }
 
+  // Handle explicit Desktop path requests
+  const isDesktopTarget = rawSub === 'Desktop' || rawSub === 'Desktop/' || rawSub.startsWith('Desktop/') || rawSub.startsWith(normDesktopRoot);
+
   let fullPath;
+  if (isDesktopTarget) {
+    if (rawSub === 'Desktop' || rawSub === 'Desktop/') {
+      fullPath = normDesktopRoot;
+    } else if (rawSub.startsWith(normDesktopRoot)) {
+      fullPath = normalizePath(rawSub);
+    } else if (rawSub.startsWith('Desktop/')) {
+      const sub = rawSub.substring('Desktop/'.length);
+      fullPath = normalizePath(`${normDesktopRoot}/${sub}`);
+    } else {
+      fullPath = normalizePath(`${normDesktopRoot}/${rawSub}`);
+    }
+
+    if (!fullPath.startsWith(normDesktopRoot)) {
+      throw new Error(`Security Error: Path "${requestedPath}" escapes Desktop boundary "${normDesktopRoot}".`);
+    }
+    return fullPath;
+  }
+
   if (rawSub === '' || rawSub === '.') {
     fullPath = normRoot;
   } else if (rawSub.startsWith(normRoot)) {

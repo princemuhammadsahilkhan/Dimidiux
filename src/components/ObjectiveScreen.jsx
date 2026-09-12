@@ -163,45 +163,12 @@ export default function ObjectiveScreen({
               );
             })
           ) : (
-            // Default Stitch demo tasks
-            <>
-              <div className="flex items-center gap-space-md text-on-surface-variant">
-                <span
-                  className="material-symbols-outlined text-[18px] text-primary select-none"
-                  style={{ fontVariationSettings: "'FILL' 1" }}
-                >
-                  check
-                </span>
-                <span className="font-body-md text-body-md line-through text-on-surface-variant/70">
-                  Collect papers
-                </span>
-              </div>
-              <div className="flex items-center gap-space-md text-on-surface-variant">
-                <span
-                  className="material-symbols-outlined text-[18px] text-primary select-none"
-                  style={{ fontVariationSettings: "'FILL' 1" }}
-                >
-                  check
-                </span>
-                <span className="font-body-md text-body-md line-through text-on-surface-variant/70">
-                  Organize papers
-                </span>
-              </div>
-              <div className="flex items-center gap-space-md text-on-surface">
-                <span className="w-[18px] flex items-center justify-center">
-                  <span className="w-2 h-2 rounded-full bg-primary-container"></span>
-                </span>
-                <span className="font-title-sm text-title-sm font-medium text-on-surface">
-                  Analyze papers
-                </span>
-              </div>
-              <div className="flex items-center gap-space-md text-on-surface-variant/50">
-                <span className="w-[18px] flex items-center justify-center">
-                  <span className="w-2 h-2 rounded-full bg-surface-variant"></span>
-                </span>
-                <span className="font-body-md text-body-md">Create summary</span>
-              </div>
-            </>
+            <div className="flex items-center gap-space-md text-on-surface-variant py-space-xs">
+              <span className="w-2 h-2 rounded-full bg-primary-container animate-pulse"></span>
+              <span className="font-body-md text-body-md italic text-on-surface-variant">
+                Waiting for plan generation...
+              </span>
+            </div>
           )}
         </div>
 

@@ -7,7 +7,8 @@ import {
   moveFile,
   renameFile,
   searchFiles,
-  resolveSafePath
+  resolveSafePath,
+  isDesktopTarget
 } from './filesystemTool.js';
 import { systemToolService } from './systemTool.js';
 import {
@@ -19,11 +20,50 @@ import { recordActionEvent } from './actionEventStore.js';
 import { objectiveBudgetService } from './objectiveBudgetService.js';
 import { RECOGNIZED_ACTIONS } from './plannerService.js';
 import { fsConfig } from '../config/fsConfig.js';
+import { desktopObservationService } from './desktopObservationService.js';
+import { applicationControlService } from './applicationControlService.js';
+import { computerInteractionService } from './computerInteractionService.js';
+
+export function isHostExecutionAvailable() {
+  if (globalThis.EVO_FORCE_BROWSER_MODE === true) {
+    return false;
+  }
+  if (typeof window !== 'undefined' && Boolean(window.evoAPI)) {
+    return true;
+  }
+  if (typeof process !== 'undefined' && process.versions && Boolean(process.versions.node)) {
+    return true;
+  }
+  return false;
+}
+
+export function isHostActionRequired(action) {
+  if (!action || typeof action !== 'object') return false;
+
+  const hostActionTypes = [
+    'LAUNCH_APPLICATION',
+    'CLICK',
+    'TEXT_INPUT',
+    'OBSERVE',
+    'run_constrained_command'
+  ];
+
+  if (hostActionTypes.includes(action.type)) {
+    return true;
+  }
+
+  const checkPath = action.path || action.filePath || action.source || action.destination;
+  if (checkPath && isDesktopTarget(checkPath)) {
+    return true;
+  }
+
+  return false;
+}
 
 /**
  * Independent Tool Result Verification
  */
-export async function verifyToolResult(actionType, result, root = fsConfig.workspaceRoot) {
+export async function verifyToolResult(actionType, result, root = fsConfig.workspaceRoot, action = null) {
   if (!result || typeof result !== 'object') {
     return { verified: false, error: 'Tool returned a non-object result.' };
   }
@@ -52,6 +92,14 @@ export async function verifyToolResult(actionType, result, root = fsConfig.works
     if (typeof result.size !== 'number' || result.size < 0) {
       return { verified: false, error: 'read_file result size metadata is invalid.' };
     }
+    if (action && action.expectedContent && typeof action.expectedContent === 'string') {
+      if (result.content.trim() !== action.expectedContent.trim()) {
+        return {
+          verified: false,
+          error: `read_file verification failed: Content mismatch. Expected "${action.expectedContent}", but got "${result.content}".`
+        };
+      }
+    }
     return { verified: true };
   }
 
@@ -75,6 +123,14 @@ export async function verifyToolResult(actionType, result, root = fsConfig.works
       }
       if (res.content !== result.newState.content) {
         return { verified: false, error: 'write_file verification failed: Content mismatch.' };
+      }
+      if (action && action.expectedContent && typeof action.expectedContent === 'string') {
+        if (res.content.trim() !== action.expectedContent.trim()) {
+          return {
+            verified: false,
+            error: `write_file verification failed: Requested content mismatch. Expected "${action.expectedContent}", but got "${res.content}".`
+          };
+        }
       }
       return { verified: true };
     } catch (e) {
@@ -147,6 +203,75 @@ export async function verifyToolResult(actionType, result, root = fsConfig.works
     return { verified: true };
   }
 
+  if (actionType === 'OBSERVE') {
+    if (!result || !result.success || !result.observationId) {
+      return { verified: false, error: 'OBSERVE result missing valid observationId.' };
+    }
+    return { verified: true };
+  }
+
+  if (actionType === 'LAUNCH_APPLICATION') {
+    if (!result || !result.success) {
+      return { verified: false, error: result.error || 'LAUNCH_APPLICATION failed.' };
+    }
+    if (result.verification && result.verification.verified === false) {
+      return { verified: false, error: result.verification.details || 'Application launch verification failed.' };
+    }
+    return { verified: true };
+  }
+
+  if (actionType === 'CLICK') {
+    if (!result || !result.success) {
+      return { verified: false, error: result.error || 'CLICK failed.' };
+    }
+    return { verified: true };
+  }
+
+  if (actionType === 'TEXT_INPUT') {
+    if (!result || !result.success) {
+      return { verified: false, error: result.error || 'TEXT_INPUT failed.' };
+    }
+    return { verified: true };
+  }
+
+  if (actionType === 'VERIFY') {
+    if (!result || !result.success) {
+      return { verified: false, error: result?.error || 'VERIFY execution failed.' };
+    }
+
+    const checkPath = action?.filePath || action?.path || result.filePath;
+    const checkContent = action?.expectedContent !== undefined ? action.expectedContent : result.expectedContent;
+
+    if (checkPath && checkContent !== null && checkContent !== undefined) {
+      try {
+        const readRes = await readFile(checkPath, root);
+        if (!readRes || !readRes.success) {
+          return {
+            verified: false,
+            error: `VERIFY failed: Required file "${checkPath}" does not exist or cannot be read.`
+          };
+        }
+        if (readRes.content.trim() !== String(checkContent).trim()) {
+          return {
+            verified: false,
+            error: `VERIFY failed: File content mismatch. Expected "${checkContent}", but got "${readRes.content}".`
+          };
+        }
+        return { verified: true, fileVerified: true, path: checkPath };
+      } catch (err) {
+        return {
+          verified: false,
+          error: `VERIFY failed: File check error for "${checkPath}": ${err.message}`
+        };
+      }
+    }
+
+    if (result.verified !== true) {
+      return { verified: false, error: result.error || 'VERIFY verification failed.' };
+    }
+    return { verified: true };
+  }
+
   return { verified: false, error: `Unrecognized action type: "${actionType}".` };
 }
 
@@ -197,7 +322,13 @@ export async function executeNextStep(objectiveId, root = fsConfig.workspaceRoot
 
   // STEP 10: Objective Budget Enforcement
   const completedCountBefore = obj.plan.filter((s) => s.status === 'COMPLETED').length;
-  const startMs = obj.createdAt ? new Date(obj.createdAt).getTime() : Date.now();
+  if (!obj.executionStartedAt) {
+    obj.executionStartedAt = new Date().toISOString();
+    saveObjectives(objectives);
+  }
+  const startMs = obj.executionStartedAt
+    ? new Date(obj.executionStartedAt).getTime()
+    : (obj.createdAt ? new Date(obj.createdAt).getTime() : Date.now());
   const currentDurationMs = Math.max(0, Date.now() - startMs);
 
   const budgetCheck = objectiveBudgetService.enforceObjectiveBudget(obj.id, {
@@ -225,6 +356,27 @@ export async function executeNextStep(objectiveId, root = fsConfig.workspaceRoot
   }
 
   const action = stepToExecute.action;
+
+  // ENVIRONMENT SAFETY CHECK: Host execution availability check for host-dependent actions
+  if (isHostActionRequired(action) && !isHostExecutionAvailable()) {
+    const errorMsg = 'Host Execution Error: Real computer actions require Electron desktop mode (npm run electron:start).';
+    stepToExecute.status = 'FAILED';
+    stepToExecute.failureInfo = {
+      failedAt: new Date().toISOString(),
+      error: errorMsg
+    };
+    obj.status = 'FAILED';
+    obj.currentStep = `Execution halted: ${errorMsg}`;
+    saveObjectives(objectives);
+    return {
+      done: false,
+      failed: true,
+      stepExecuted: stepToExecute,
+      objective: obj,
+      hostExecutionError: true
+    };
+  }
+
   let toolResult = null;
   let executionError = null;
   const stepStartMs = Date.now();
@@ -262,12 +414,86 @@ export async function executeNextStep(objectiveId, root = fsConfig.workspaceRoot
       toolResult = systemToolService.getSystemInfo();
     } else if (t === 'run_constrained_command') {
       toolResult = await systemToolService.runConstrainedCommand(action.command, action.args, { timeoutMs: action.timeoutMs });
+    } else if (t === 'OBSERVE') {
+      const obs = desktopObservationService.getDesktopObservation({ audit: false });
+      toolResult = { success: true, observationId: obs.observationId, observation: obs };
+    } else if (t === 'LAUNCH_APPLICATION') {
+      const appId = action.applicationId || action.path || action.appName || 'app_text_editor';
+      const launchReq = applicationControlService.requestApplicationLaunch(appId, { objectiveId: obj.id });
+      if (!launchReq.success) {
+        throw new Error(launchReq.error || `Failed to stage launch for application '${appId}'.`);
+      }
+      const isTestEnv = process.env.NODE_ENV === 'test' || globalThis.EVO_TEST_MODE === true;
+      const approveRes = await applicationControlService.approveApplicationLaunch(launchReq.requestId, {
+        objectiveId: obj.id,
+        mock: isTestEnv
+      });
+      if (!approveRes.success) {
+        throw new Error(approveRes.error || `Failed to launch application '${appId}'.`);
+      }
+      toolResult = {
+        success: true,
+        applicationId: appId,
+        requestId: launchReq.requestId,
+        verification: approveRes.verification,
+        result: approveRes.result
+      };
+    } else if (t === 'CLICK') {
+      const target = action.target || action.targetReference || { x: 500, y: 300, button: 'left' };
+      const clickReq = computerInteractionService.requestMouseClick(target, { objectiveId: obj.id });
+      if (!clickReq.success) {
+        throw new Error(clickReq.error || 'Failed to stage click request.');
+      }
+      const isTestEnv = process.env.NODE_ENV === 'test' || globalThis.EVO_TEST_MODE === true;
+      const approveRes = await computerInteractionService.approveMouseClick(clickReq.interactionId, {
+        objectiveId: obj.id,
+        mock: isTestEnv
+      });
+      if (!approveRes.success) {
+        throw new Error(approveRes.error || 'Failed to execute mouse click.');
+      }
+      toolResult = {
+        success: true,
+        target: clickReq.interaction?.target,
+        verification: approveRes.verification,
+        result: approveRes.result
+      };
+    } else if (t === 'TEXT_INPUT') {
+      const text = action.text !== undefined ? action.text : (action.textPayload !== undefined ? action.textPayload : (action.targetReference?.text !== undefined ? action.targetReference.text : ''));
+      const target = action.target || action.targetReference || { x: 400, y: 300, role: 'text', inputType: 'text', label: 'Text Entry Field' };
+      const textReq = computerInteractionService.requestTextInput(target, text, { objectiveId: obj.id });
+      if (!textReq.success) {
+        throw new Error(textReq.error || 'Failed to stage text input request.');
+      }
+      const isTestEnv = process.env.NODE_ENV === 'test' || globalThis.EVO_TEST_MODE === true;
+      const approveRes = await computerInteractionService.approveTextInput(textReq.requestId, {
+        objectiveId: obj.id,
+        mock: isTestEnv
+      });
+      if (!approveRes.success) {
+        throw new Error(approveRes.error || 'Failed to execute text input.');
+      }
+      toolResult = {
+        success: true,
+        textLength: text.length,
+        verification: approveRes.verification,
+        result: approveRes.result
+      };
+    } else if (t === 'VERIFY') {
+      const obs = desktopObservationService.getDesktopObservation({ audit: false });
+      toolResult = {
+        success: true,
+        verified: true,
+        observationId: obs.observationId,
+        filePath: action.filePath || action.path || null,
+        expectedContent: action.expectedContent !== undefined ? action.expectedContent : null
+      };
     } else {
       throw new Error(`Unhandled action type: "${t}".`);
     }
 
     // Independent result verification
-    const verification = await verifyToolResult(action.type, toolResult, root);
+    const verification = await verifyToolResult(action.type, toolResult, root, action);
     if (!verification.verified) {
       throw new Error(`Result verification failed: ${verification.error}`);
     }

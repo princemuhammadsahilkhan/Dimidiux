@@ -9,6 +9,7 @@ import {
   MEMORY_SOURCES,
   MEMORY_STATUS
 } from './memoryStore.js';
+import { computeWorkflowFingerprint } from './capabilityStore.js';
 
 // Centralized Sensitive Data Filter (Requirement 8)
 const SENSITIVE_PATTERNS = [
@@ -163,10 +164,13 @@ export function extractExperienceFromObjective(objective) {
     return null;
   }
 
+  const workflowFingerprint = computeWorkflowFingerprint(plan);
+
   const expMem = createMemory({
     type: MEMORY_TYPES.EXPERIENCE,
     content,
     context: objective.goal,
+    workflowFingerprint: workflowFingerprint || null,
     source: MEMORY_SOURCES.OBJECTIVE_RESULT,
     confidence: 0.85
   });
@@ -184,7 +188,7 @@ export function extractExperienceFromObjective(objective) {
       reinforceMemory(existingWorkflow.id, { confidenceDelta: 0.1 });
     } else {
       const existingExp = getMemories().find(
-        (m) => m.type === MEMORY_TYPES.EXPERIENCE && m.context === objective.goal
+        (m) => m.type === MEMORY_TYPES.EXPERIENCE && ((workflowFingerprint && m.workflowFingerprint === workflowFingerprint) || m.context === objective.goal)
       );
       if (existingExp && existingExp.evidenceCount >= 2) {
         createMemory({

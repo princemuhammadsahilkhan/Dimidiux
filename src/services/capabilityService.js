@@ -63,7 +63,9 @@ export function normalizeStep(step) {
       path: params.path || params.targetPath || (typeof step.action === 'object' && step.action ? step.action.path : ''),
       source: params.source || (typeof step.action === 'object' && step.action ? step.action.source : ''),
       destination: params.destination || (typeof step.action === 'object' && step.action ? step.action.destination : ''),
-      content: params.content !== undefined ? params.content : (typeof step.action === 'object' && step.action ? step.action.content : '')
+      content: params.content !== undefined ? params.content : (typeof step.action === 'object' && step.action ? step.action.content : ''),
+      target: params.target || (typeof step.action === 'object' && step.action ? step.action.target : ''),
+      text: params.text !== undefined ? params.text : (typeof step.action === 'object' && step.action ? step.action.text : '')
     },
     params
   };
@@ -173,6 +175,8 @@ export function simulateWorkflowExecution(workflowSteps) {
       } else {
         virtualFs.add(action.destination.trim());
       }
+    } else if (type === 'OBSERVE' || type === 'LAUNCH_APPLICATION' || type === 'CLICK' || type === 'TEXT_INPUT' || type === 'VERIFY') {
+      // Computer task action types pass dry-run logical simulation cleanly
     }
   }
 
@@ -262,17 +266,18 @@ export function validateAllCapabilityCandidates() {
 }
 
 /**
- * Extracts target objective parameters (folder, file, content) deterministically from text
+ * Extracts target objective parameters (folder, file, content, text) deterministically from text
  */
 export function extractGoalParameters(goalText) {
   if (!goalText || typeof goalText !== 'string') {
-    return { folder: null, file: null, content: null };
+    return { folder: null, file: null, content: null, text: null };
   }
 
   const g = goalText.trim();
   let folder = null;
   let file = null;
   let content = null;
+  let text = null;
 
   const folderMatch = g.match(/(?:folder|directory|dir)\s+(?:called|named)?\s*["`']?([a-zA-Z0-9_\-\.]+)/i);
   if (folderMatch) {
@@ -284,12 +289,41 @@ export function extractGoalParameters(goalText) {
     file = fileMatch[1];
   }
 
-  const contentMatch = g.match(/(?:containing|content|with text)\s+["`']?([^"`']+)["`']?/i);
-  if (contentMatch) {
-    content = contentMatch[1].trim().replace(/[\.\!\?]+$/, '');
+  // Quoted content first
+  const quotedContentMatch = g.match(/(?:containing|content|with text)\s*:?\s*["`']([^"`']+)["`']/i);
+  if (quotedContentMatch) {
+    content = quotedContentMatch[1].trim();
+  } else {
+    // Unquoted content: stop before trailing prompt sentences, e.g. ". Then", ". Verify", etc.
+    const unquotedContentMatch = g.match(/(?:containing|content|with text)\s*:?\s*([^.\n!]+?)(?=\s*\.|\s+then|\s+and|\s+verify|$)/i);
+    if (unquotedContentMatch) {
+      content = unquotedContentMatch[1].trim();
+    }
   }
 
-  return { folder, file, content };
+  // Extract ordinary computer text input parameter
+  const writeQuoteMatch = g.match(/(?:write|type|input|note|containing:?)\s*:?\s*["`']([^"`']+)["`']/i);
+  if (writeQuoteMatch) {
+    text = writeQuoteMatch[1].trim();
+  } else {
+    const writeColonMatch = g.match(/(?:write|type|containing:)\s*\n?([^\n\.,!\?]+)/i);
+    if (writeColonMatch) {
+      const candidate = writeColonMatch[1].trim();
+      if (candidate && !/^(?:the|a|an|and)\b/i.test(candidate)) {
+        text = candidate;
+      }
+    }
+  }
+
+  // Sensitive text check: Block passwords, secrets, private keys, API tokens
+  if (text) {
+    const sensitiveRegex = /(?:password|passwd|secret|api_key|token|private_key|auth_token|credentials)/i;
+    if (sensitiveRegex.test(text) || sensitiveRegex.test(g)) {
+      text = null;
+    }
+  }
+
+  return { folder, file, content, text };
 }
 
 /**
@@ -361,6 +395,75 @@ export function matchCapabilities(goalText) {
       reasons.push('File operation intent matches validated workflow.');
     }
 
+    const isComputerGoalIntent = goalLower.includes('text editor') || goalLower.includes('editor application') ||
+                                 goalLower.includes('launch application') || goalLower.includes('open application') ||
+                                 goalLower.includes('calculator') || goalLower.includes('terminal');
+
+    // Computer Capability Matching Logic
+    const isComputerCap = cap.workflowSteps.some((s) => {
+      const type = typeof s.action === 'string' ? s.action : (s.action && s.action.type);
+      return ['OBSERVE', 'LAUNCH_APPLICATION', 'CLICK', 'TEXT_INPUT', 'VERIFY'].includes(type);
+    });
+
+    if (isComputerGoalIntent && !isComputerCap) {
+      continue;
+    }
+
+    if (isComputerCap) {
+      const appLaunchStep = cap.workflowSteps.find((s) => {
+        const action = typeof s.action === 'object' ? s.action : {};
+        return action.type === 'LAUNCH_APPLICATION';
+      });
+      const capAppId = appLaunchStep?.action?.target || appLaunchStep?.action?.application || appLaunchStep?.action?.path || null;
+
+      let appMatchesGoal = false;
+      let appContradiction = false;
+
+      if (capAppId === 'app_text_editor') {
+        appMatchesGoal = goalLower.includes('text editor') || goalLower.includes('text_editor') || goalLower.includes('editor');
+        if (goalLower.includes('calculator') || goalLower.includes('calc')) {
+          appContradiction = true;
+        }
+      } else if (capAppId === 'app_calculator') {
+        appMatchesGoal = goalLower.includes('calculator') || goalLower.includes('calc');
+        if (goalLower.includes('text editor') || goalLower.includes('editor')) {
+          appContradiction = true;
+        }
+      } else if (capAppId) {
+        const cleanAppName = capAppId.toLowerCase().replace(/^app_/, '');
+        appMatchesGoal = goalLower.includes(cleanAppName);
+      }
+
+      const isComputerGoal = goalLower.includes('open') || goalLower.includes('editor') ||
+                             goalLower.includes('write') || goalLower.includes('type') ||
+                             goalLower.includes('click') || goalLower.includes('verify') ||
+                             goalLower.includes('calculator') || goalLower.includes('calc');
+
+      if (isComputerGoal && appMatchesGoal && !appContradiction) {
+        const hasWriteInGoal = goalLower.includes('write') || goalLower.includes('type') || goalLower.includes('note') || goalLower.includes('input');
+        const hasClickInGoal = goalLower.includes('click');
+        const hasVerifyInGoal = goalLower.includes('verify');
+
+        const hasTextInputStep = cap.workflowSteps.some((s) => (s.action?.type || s.action) === 'TEXT_INPUT');
+        const hasClickStep = cap.workflowSteps.some((s) => (s.action?.type || s.action) === 'CLICK');
+        const hasVerifyStep = cap.workflowSteps.some((s) => (s.action?.type || s.action) === 'VERIFY');
+
+        const hasCloseInGoal = goalLower.includes('close') || goalLower.includes('exit') || goalLower.includes('delete');
+        const hasCloseStep = cap.workflowSteps.some((s) => (s.action?.type || s.action) === 'CLOSE_APPLICATION');
+
+        let structuralMatch = true;
+        if (hasWriteInGoal && !hasTextInputStep) structuralMatch = false;
+        if (hasClickInGoal && !hasClickStep) structuralMatch = false;
+        if (hasVerifyInGoal && !hasVerifyStep) structuralMatch = false;
+        if (hasCloseInGoal && !hasCloseStep) structuralMatch = false;
+
+        if (structuralMatch) {
+          score += 0.35;
+          reasons.push(`Computer application & structural intent match validated capability (${capAppId || 'computer_workflow'}).`);
+        }
+      }
+    }
+
     if (score >= 0.7 && score > highestScore) {
       highestScore = score;
       bestMatch = {
@@ -405,7 +508,39 @@ export function adaptCapabilityWorkflow(capability, targetParams = {}, options =
     return { success: false, error: 'Invalid capability or workflow steps.' };
   }
 
-  const { folder, file, content } = targetParams;
+  // Security Check 1: Action Authorization on candidate steps FIRST
+  reuseOptimizationTracker.securityCheckCount++;
+  const rawActionCheck = validateCandidateActions(capability.workflowSteps);
+  if (!rawActionCheck.valid) {
+    return { success: false, error: `Unauthorized action type in capability: ${rawActionCheck.error}` };
+  }
+
+  const { folder, file, content, text } = targetParams;
+  const newText = text || content;
+
+  // Requirement 10: Fail safe if required adaptation parameters are completely missing
+  const hasDirectoryStep = capability.workflowSteps.some((s) => {
+    const type = typeof s.action === 'string' ? s.action : (s.action && s.action.type);
+    return type === 'create_directory' || type === 'list_directory';
+  });
+  const hasWriteFileStep = capability.workflowSteps.some((s) => {
+    const type = typeof s.action === 'string' ? s.action : (s.action && s.action.type);
+    return type === 'write_file';
+  });
+  const hasReadFileStep = capability.workflowSteps.some((s) => {
+    const type = typeof s.action === 'string' ? s.action : (s.action && s.action.type);
+    return type === 'read_file';
+  });
+
+  const isParamsEmpty = !folder && !file && !content && !text;
+  if (isParamsEmpty && (hasDirectoryStep || hasWriteFileStep || hasReadFileStep)) {
+    return { success: false, error: 'Missing required parameters (folder, file, content) for capability workflow adaptation.' };
+  }
+
+  const baseFolder = capability.workflowSteps.find((s) => {
+    const act = s.action || {};
+    return act.type === 'create_directory' && act.path;
+  })?.action?.path;
 
   const adaptedSteps = capability.workflowSteps.map((step, idx) => {
     const norm = normalizeStep(step) || step;
@@ -413,59 +548,86 @@ export function adaptCapabilityWorkflow(capability, targetParams = {}, options =
     const type = origAction.type;
     const newAction = { ...origAction };
 
-    // Substitutes template placeholders ({folder}, {file}, {content}) in action fields
-    if (folder) {
-      if (typeof newAction.path === 'string') newAction.path = newAction.path.replace(/\{folder\}/g, folder);
-      if (typeof newAction.source === 'string') newAction.source = newAction.source.replace(/\{folder\}/g, folder);
-      if (typeof newAction.destination === 'string') newAction.destination = newAction.destination.replace(/\{folder\}/g, folder);
-    }
-    if (file) {
-      if (typeof newAction.path === 'string') newAction.path = newAction.path.replace(/\{file\}/g, file);
-      if (typeof newAction.source === 'string') newAction.source = newAction.source.replace(/\{file\}/g, file);
-      if (typeof newAction.destination === 'string') newAction.destination = newAction.destination.replace(/\{file\}/g, file);
-    }
-    if (content !== undefined && content !== null) {
-      if (typeof newAction.content === 'string') newAction.content = newAction.content.replace(/\{content\}/g, content);
+    if (type === 'TEXT_INPUT' && newText) {
+      newAction.text = newText;
+      if (typeof newAction.path === 'string') newAction.path = newText;
     }
 
     if (type === 'create_directory') {
-      if (folder && newAction.path && !newAction.path.startsWith(folder)) {
-        newAction.path = `${folder}/${newAction.path}`;
-      } else if (folder && !newAction.path) {
+      if (folder) {
         newAction.path = folder;
       }
-    } else if (type === 'write_file') {
-      if (folder && file && capability.workflowSteps.length <= 2) {
+    } else if (type === 'write_file' || type === 'read_file') {
+      if (folder && file) {
         newAction.path = `${folder}/${file}`;
-      } else if (file && capability.workflowSteps.length <= 2) {
+      } else if (file) {
         newAction.path = file;
-      } else if (folder && newAction.path && !newAction.path.startsWith(folder)) {
-        newAction.path = `${folder}/${newAction.path}`;
+      } else if (folder && baseFolder && typeof newAction.path === 'string' && newAction.path.startsWith(`${baseFolder}/`)) {
+        newAction.path = newAction.path.replace(new RegExp(`^${baseFolder}/`), `${folder}/`);
+      } else if (folder && newAction.path && !newAction.path.startsWith(`${folder}/`)) {
+        const baseFileName = newAction.path.split('/').pop();
+        newAction.path = `${folder}/${baseFileName}`;
       }
-    } else if (type === 'read_file') {
-      if (folder && file && capability.workflowSteps.length <= 2) {
-        newAction.path = `${folder}/${file}`;
-      } else if (file && capability.workflowSteps.length <= 2) {
-        newAction.path = file;
-      } else if (folder && newAction.path && !newAction.path.startsWith(folder)) {
-        newAction.path = `${folder}/${newAction.path}`;
+
+      if (type === 'write_file') {
+        const targetContent = (content !== undefined && content !== null) ? content : newText;
+        if (targetContent !== undefined && targetContent !== null) {
+          newAction.content = targetContent;
+          newAction.expectedContent = targetContent;
+        }
+      } else if (type === 'read_file') {
+        const targetContent = (content !== undefined && content !== null) ? content : newText;
+        if (targetContent !== undefined && targetContent !== null) {
+          newAction.expectedContent = targetContent;
+        }
       }
     } else if (type === 'copy_file' || type === 'move_file') {
       if (folder) {
-        if (origAction.source && !origAction.source.startsWith(folder)) {
-          newAction.source = `${folder}/${origAction.source}`;
-        }
-        if (origAction.destination && !origAction.destination.startsWith(folder)) {
-          newAction.destination = `${folder}/${origAction.destination}`;
-        }
+        const srcFile = origAction.source ? origAction.source.split('/').pop() : (file || 'file');
+        const destFile = origAction.destination ? origAction.destination.split('/').pop() : (file || 'file');
+        newAction.source = `${folder}/${srcFile}`;
+        newAction.destination = `${folder}/${destFile}`;
+      }
+    }
+
+    // Requirement 9: Regenerate step titles using adapted action parameters
+    let adaptedTitle = `Step ${idx + 1}`;
+    if (type === 'create_directory') {
+      adaptedTitle = `Create ${newAction.path || folder || 'directory'} directory`;
+    } else if (type === 'write_file') {
+      adaptedTitle = `Create file ${newAction.path || file || 'file'}`;
+    } else if (type === 'read_file') {
+      adaptedTitle = `Read and verify ${newAction.path || file || 'file'}`;
+    } else if (type === 'copy_file') {
+      adaptedTitle = `Copy file to ${newAction.destination || 'destination'}`;
+    } else if (type === 'move_file') {
+      adaptedTitle = `Move file to ${newAction.destination || 'destination'}`;
+    } else if (type === 'LAUNCH_APPLICATION') {
+      adaptedTitle = `Launch ${newAction.target || newAction.application || 'application'}`;
+    } else if (type === 'TEXT_INPUT') {
+      adaptedTitle = `Input text: "${newAction.text || 'text'}"`;
+    } else if (type === 'CLICK') {
+      adaptedTitle = `Click ${newAction.target || 'target'}`;
+    } else if (type === 'VERIFY') {
+      adaptedTitle = `Verify ${newAction.target || 'result'}`;
+    } else if (step.title) {
+      adaptedTitle = step.title;
+      if (folder) {
+        adaptedTitle = adaptedTitle.replace(/\b[A-Za-z0-9_\-]*Test[A-Za-z0-9_\-]*\b/gi, folder);
       }
     }
 
     return {
-      title: step.title ? step.title.replace(/TestProject|Research|workspace/gi, folder || 'workspace') : `Step ${idx + 1}`,
+      title: adaptedTitle,
       action: newAction
     };
   });
+
+  // Security Check 2: Action Authorization on Adapted Steps
+  const adaptedActionCheck = validateCandidateActions(adaptedSteps);
+  if (!adaptedActionCheck.valid) {
+    return { success: false, error: adaptedActionCheck.error };
+  }
 
   // Security Check 1: Action Authorization
   reuseOptimizationTracker.securityCheckCount++;
@@ -673,6 +835,25 @@ function parseWorkflowStepsFromContent(content, context) {
 
   const targetPath = context ? context.trim() : 'workspace';
   const steps = [];
+
+  if (content.includes('OBSERVE') || content.includes('LAUNCH_APPLICATION') || content.includes('TEXT_INPUT') || content.includes('CLICK')) {
+    if (content.includes('OBSERVE')) {
+      steps.push({ title: 'Capture desktop observation', action: { type: 'OBSERVE' } });
+    }
+    if (content.includes('LAUNCH_APPLICATION')) {
+      steps.push({ title: 'Launch allowlisted application', action: { type: 'LAUNCH_APPLICATION', path: 'app_text_editor' } });
+    }
+    if (content.includes('TEXT_INPUT')) {
+      steps.push({ title: 'Input text payload', action: { type: 'TEXT_INPUT', content: 'Sample text payload' } });
+    }
+    if (content.includes('CLICK')) {
+      steps.push({ title: 'Click target UI element', action: { type: 'CLICK' } });
+    }
+    if (content.includes('VERIFY')) {
+      steps.push({ title: 'Verify task completion', action: { type: 'VERIFY' } });
+    }
+    if (steps.length > 0) return steps;
+  }
 
   if (content.includes('create_directory') || content.includes('Create folder')) {
     steps.push({

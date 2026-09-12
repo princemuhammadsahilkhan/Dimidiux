@@ -164,7 +164,14 @@ export function computeWorkflowFingerprint(workflowSteps) {
   return workflowSteps
     .map((s) => {
       const type = s.action ? s.action.type : (s.type || '');
-      const path = s.action ? (s.action.path || s.action.destination || '') : (s.path || '');
+      let path = s.action ? (s.action.path || s.action.destination || '') : (s.path || '');
+
+      // Structural normalization for TEXT_INPUT: ensure variable text input payloads do not change workflow fingerprint key.
+      if (type === 'TEXT_INPUT') {
+        const structuralTarget = s.action?.params?.applicationId || s.action?.params?.role || s.action?.params?.inputType || s.params?.role || s.params?.inputType;
+        path = structuralTarget || 'text';
+      }
+
       return `${type}:${path}`;
     })
     .join('->');

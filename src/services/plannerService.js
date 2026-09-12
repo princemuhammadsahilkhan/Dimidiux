@@ -1,4 +1,5 @@
 import { searchMemory } from './memoryService.js';
+import { planComputerTask } from './computerTaskService.js';
 
 export const RECOGNIZED_ACTIONS = [
   'list_directory',
@@ -11,7 +12,12 @@ export const RECOGNIZED_ACTIONS = [
   'search_files',
   'get_time',
   'get_system_info',
-  'run_constrained_command'
+  'run_constrained_command',
+  'OBSERVE',
+  'LAUNCH_APPLICATION',
+  'CLICK',
+  'TEXT_INPUT',
+  'VERIFY'
 ];
 
 /**
@@ -123,8 +129,21 @@ export class LocalDeterministicPlannerProvider {
       targetSubfolder = 'Research/Articles';
     }
 
-    // Explicit Research Organization Workflow
-    if (gLower.includes('research') && (gLower.includes('organize') || gLower.includes('paper'))) {
+    const isComputerGoalIntent = gLower.includes('text editor') || gLower.includes('editor application') ||
+                                 gLower.includes('launch application') || gLower.includes('open application') ||
+                                 gLower.includes('calculator') || gLower.includes('terminal');
+
+    if (isComputerGoalIntent) {
+      const computerTask = planComputerTask(g);
+      stepsData = computerTask.steps.map((s) => ({
+        title: s.description || `Execute ${s.type}`,
+        description: s.description || `Computer task step ${s.type}`,
+        action: {
+          type: s.type,
+          ...(s.targetReference || {})
+        }
+      }));
+    } else if (gLower.includes('research') && (gLower.includes('organize') || gLower.includes('paper'))) {
       stepsData = [
         {
           title: 'Inspect root workspace',
@@ -203,9 +222,12 @@ export class LocalDeterministicPlannerProvider {
 
         const contentMatch = g.match(/containing\s+["`']([^"`']+)["`']/i) ||
                              g.match(/with\s+content\s+["`']([^"`']+)["`']/i) ||
-                             g.match(/content\s+["`']([^"`']+)["`']/i);
+                             g.match(/content\s+["`']([^"`']+)["`']/i) ||
+                             g.match(/containing\s+([^.\n,]+?)(?:\s*\.|\s+Then|\s+and|\s*,|\s*$)/i) ||
+                             g.match(/with\s+content\s+([^.\n,]+?)(?:\s*\.|\s+Then|\s+and|\s*,|\s*$)/i) ||
+                             g.match(/content\s+([^.\n,]+?)(?:\s*\.|\s+Then|\s+and|\s*,|\s*$)/i);
         if (contentMatch) {
-          fileContent = contentMatch[1];
+          fileContent = contentMatch[1].trim();
         }
 
         let fullFilePath = fileName || (folderName ? `${folderName}/hello.txt` : 'output.txt');
@@ -225,7 +247,7 @@ export class LocalDeterministicPlannerProvider {
           stepsData.push({
             title: `Create file ${fullFilePath}`,
             description: `Write file ${fullFilePath} containing "${fileContent}"`,
-            action: { type: 'write_file', path: fullFilePath, content: fileContent }
+            action: { type: 'write_file', path: fullFilePath, content: fileContent, expectedContent: fileContent }
           });
         }
 
@@ -233,7 +255,7 @@ export class LocalDeterministicPlannerProvider {
           stepsData.push({
             title: `Verify ${fullFilePath} exists`,
             description: `Read and verify ${fullFilePath}`,
-            action: { type: 'read_file', path: fullFilePath }
+            action: { type: 'read_file', path: fullFilePath, expectedContent: fileContent }
           });
         }
       }

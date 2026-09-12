@@ -86,8 +86,17 @@ function normalizeContent(str) {
 /**
  * Find duplicate active memory item
  */
-export function findDuplicateMemory(type, content) {
+export function findDuplicateMemory(type, content, workflowFingerprint = null) {
   const memories = getMemories();
+
+  // If a non-empty workflowFingerprint is provided for EXPERIENCE memory, match by workflow identity
+  if (type === MEMORY_TYPES.EXPERIENCE && workflowFingerprint && typeof workflowFingerprint === 'string') {
+    const matchByFp = memories.find((m) => {
+      return m.status === MEMORY_STATUS.ACTIVE && m.type === type && m.workflowFingerprint === workflowFingerprint;
+    });
+    if (matchByFp) return matchByFp;
+  }
+
   const normTarget = normalizeContent(content);
   return memories.find((m) => {
     if (m.status !== MEMORY_STATUS.ACTIVE) return false;
@@ -114,12 +123,13 @@ export function createMemory(data) {
   initialConfidence = Math.max(0, Math.min(1.0, initialConfidence));
 
   // Check for duplicate active memory item
-  const duplicate = findDuplicateMemory(type, data.content);
+  const duplicate = findDuplicateMemory(type, data.content, data.workflowFingerprint);
   if (duplicate) {
     return reinforceMemory(duplicate.id, {
       confidenceDelta: 0.05,
       content: data.content,
-      context: data.context || duplicate.context
+      context: data.context || duplicate.context,
+      preserveContent: Boolean(data.workflowFingerprint && duplicate.workflowFingerprint === data.workflowFingerprint)
     });
   }
 
@@ -128,6 +138,7 @@ export function createMemory(data) {
     type,
     content: data.content.trim(),
     context: data.context ? data.context.trim() : '',
+    workflowFingerprint: data.workflowFingerprint || null,
     source,
     confidence: initialConfidence,
     evidenceCount: data.evidenceCount || 1,
@@ -168,8 +179,8 @@ export function reinforceMemory(id, options = {}) {
         evidenceCount: m.evidenceCount + 1,
         lastEvidenceAt: now,
         updatedAt: now,
-        content: options.content ? options.content.trim() : m.content,
-        context: options.context ? options.context.trim() : m.context
+        content: (options.preserveContent || !options.content) ? m.content : options.content.trim(),
+        context: (options.preserveContent || !options.context) ? m.context : options.context.trim()
       };
       return target;
     }

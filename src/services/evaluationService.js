@@ -331,6 +331,193 @@ export class EvaluationService {
       insufficientEvidenceCount
     };
   }
+
+  /**
+   * Stage 5F: Passive Read-Only Detection of Duration Regressions
+   */
+  detectDurationRegressions(evaluationsList = null, options = {}) {
+    const evals = Array.isArray(evaluationsList) ? evaluationsList : getEvaluations();
+    const minSessions = options.minSessions || 3;
+    const minMultiplier = options.minMultiplier || 2.5;
+    const maxCv = options.maxCv || 0.40;
+
+    if (!evals || evals.length === 0) {
+      return { detected: false, reason: 'No evaluations available.', metric: null };
+    }
+
+    // Filter out environmental failures (ENOENT, EACCES, network error)
+    const validEvals = evals.filter((e) => {
+      if (!e || e.success === false) {
+        const reason = String(e ? e.failureReason || '' : '').toLowerCase();
+        if (reason.includes('enoent') || reason.includes('eacces') || reason.includes('permission denied') || reason.includes('network error')) {
+          return false;
+        }
+      }
+      return true;
+    });
+
+    // Group evaluations by objective ID to ensure multi-session evidence
+    const objMap = {};
+    validEvals.forEach((e) => {
+      const objId = e.objectiveId || 'unknown';
+      if (!objMap[objId]) objMap[objId] = [];
+      objMap[objId].push(e);
+    });
+
+    const objIds = Object.keys(objMap);
+    if (objIds.length < minSessions) {
+      return {
+        detected: false,
+        reason: `Insufficient distinct objectives/sessions for duration regression (got ${objIds.length}, required >= ${minSessions}).`,
+        metric: null
+      };
+    }
+
+    // Calculate duration statistics across valid evaluations
+    const durations = validEvals.map((e) => e.executionDurationMs || 0).filter((d) => d > 0);
+    if (durations.length < minSessions) {
+      return { detected: false, reason: 'Insufficient duration data across sessions.', metric: null };
+    }
+
+    // Split into historical baseline (first half) and recent observed (second half)
+    const mid = Math.floor(durations.length / 2);
+    const sliceIdx = mid > 0 ? mid : 1;
+    const baselineDurations = durations.slice(0, sliceIdx);
+    const observedDurations = durations.slice(sliceIdx);
+
+    const baseMean = baselineDurations.reduce((a, b) => a + b, 0) / baselineDurations.length;
+    const obsMean = observedDurations.reduce((a, b) => a + b, 0) / observedDurations.length;
+
+    if (baseMean <= 0 || obsMean <= 0) {
+      return { detected: false, reason: 'Invalid non-positive duration baseline.', metric: null };
+    }
+
+    const multiplier = obsMean / baseMean;
+    if (multiplier < minMultiplier) {
+      return {
+        detected: false,
+        reason: `Duration multiplier ${multiplier.toFixed(2)}x is below required threshold ${minMultiplier}x.`,
+        metric: null
+      };
+    }
+
+    // Stability Rule: Calculate Coefficient of Variation (stdDev / mean) for observed set
+    const obsVariance = observedDurations.reduce((sum, d) => sum + Math.pow(d - obsMean, 2), 0) / observedDurations.length;
+    const obsStdDev = Math.sqrt(obsVariance);
+    const cv = obsMean > 0 ? obsStdDev / obsMean : 0;
+
+    if (cv > maxCv) {
+      return {
+        detected: false,
+        reason: `Unstable high variance (coefficient of variation ${cv.toFixed(2)} exceeds max ${maxCv}). Sample rejected.`,
+        metric: null
+      };
+    }
+
+    const sampleEvalIds = validEvals.map((e) => e.id || e.objectiveId);
+
+    const metric = {
+      id: `metric_duration_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      metricType: 'DURATION_REGRESSION',
+      affectedComponent: 'executionEngine',
+      targetFiles: ['src/services/executionEngine.js'],
+      sampleSize: objIds.length,
+      baselineValue: Math.round(baseMean),
+      observedValue: Math.round(obsMean),
+      multiplier: Number(multiplier.toFixed(2)),
+      evidenceIds: sampleEvalIds,
+      normalization: { fileCount: options.fileCount || 1, cv: Number(cv.toFixed(4)) },
+      timestamp: new Date().toISOString()
+    };
+
+    return {
+      detected: true,
+      metric
+    };
+  }
+
+  /**
+   * Stage 5F: Passive Read-Only Detection of Planning Overhead / Step Bloat
+   */
+  detectPlanningOverhead(evaluationsList = null, options = {}) {
+    const evals = Array.isArray(evaluationsList) ? evaluationsList : getEvaluations();
+    const minSessions = options.minSessions || 3;
+    const minMultiplier = options.minMultiplier || 2.5;
+
+    if (!evals || evals.length === 0) {
+      return { detected: false, reason: 'No evaluations available.', metric: null };
+    }
+
+    // Exclude capability reuse executions (must be dynamic planning) and environmental failures
+    const coreEvals = evals.filter((e) => {
+      if (e.reusedCapability || e.capabilityId) return false;
+      if (e.success === false) {
+        const reason = String(e.failureReason || '').toLowerCase();
+        if (reason.includes('enoent') || reason.includes('eacces') || reason.includes('permission denied')) {
+          return false;
+        }
+      }
+      return true;
+    });
+
+    const objMap = {};
+    coreEvals.forEach((e) => {
+      const objId = e.objectiveId || 'unknown';
+      if (!objMap[objId]) objMap[objId] = [];
+      objMap[objId].push(e);
+    });
+
+    const objIds = Object.keys(objMap);
+    if (objIds.length < minSessions) {
+      return {
+        detected: false,
+        reason: `Insufficient distinct objectives/sessions for planning overhead (got ${objIds.length}, required >= ${minSessions}).`,
+        metric: null
+      };
+    }
+
+    const stepCounts = coreEvals.map((e) => e.stepCount || 0).filter((s) => s > 0);
+    if (stepCounts.length < minSessions) {
+      return { detected: false, reason: 'Insufficient step count data across sessions.', metric: null };
+    }
+
+    const mid = Math.floor(stepCounts.length / 2);
+    const baseMean = stepCounts.slice(0, mid > 0 ? mid : 1).reduce((a, b) => a + b, 0) / (mid > 0 ? mid : 1);
+    const obsMean = stepCounts.slice(mid > 0 ? mid : 1).reduce((a, b) => a + b, 0) / (stepCounts.length - (mid > 0 ? mid : 1));
+
+    if (baseMean <= 0) {
+      return { detected: false, reason: 'Invalid non-positive step count baseline.', metric: null };
+    }
+
+    const multiplier = obsMean / baseMean;
+    if (multiplier < minMultiplier) {
+      return {
+        detected: false,
+        reason: `Step bloat multiplier ${multiplier.toFixed(2)}x below threshold ${minMultiplier}x.`,
+        metric: null
+      };
+    }
+
+    const metric = {
+      id: `metric_planning_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      metricType: 'PLANNING_OVERHEAD',
+      affectedComponent: 'plannerService',
+      targetFiles: ['src/services/plannerService.js'],
+      sampleSize: objIds.length,
+      baselineValue: Math.round(baseMean),
+      observedValue: Math.round(obsMean),
+      multiplier: Number(multiplier.toFixed(2)),
+      evidenceIds: coreEvals.map((e) => e.id || e.objectiveId),
+      normalization: { averageSteps: Number(obsMean.toFixed(2)) },
+      timestamp: new Date().toISOString()
+    };
+
+    return {
+      detected: true,
+      metric
+    };
+  }
 }
 
 export const evaluationService = new EvaluationService();
+

@@ -82,6 +82,7 @@ export function recordActionEvent(eventData) {
   const inputHash = generateInputHash(rawInputs);
 
   const record = {
+    ...eventData,
     id: eventData.id || `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
     objectiveId: eventData.objectiveId || 'unknown_obj',
     stepId: eventData.stepId || null,
@@ -140,6 +141,127 @@ export function reconstructObjectiveTimeline(objectiveId) {
   };
 }
 
+/**
+ * Stage 5F: Passive Read-Only Detection of Redundant Operations across Action Events
+ */
+export function detectRedundantOperations(eventsList = null, options = {}) {
+  const events = Array.isArray(eventsList) ? eventsList : getActionEvents();
+  const minSessions = options.minSessions || 3;
+  const minRatio = options.minRedundancyRatio || 0.30;
+
+  if (!events || events.length === 0) {
+    return { detected: false, reason: 'No action events available.', metric: null };
+  }
+
+  // Filter out capability workflow executions (Rule 3: Capability redundancy is CAPABILITY_WORKFLOW)
+  const coreEvents = events.filter((e) => !e.capabilityId && !e.reusedCapability);
+  const capEvents = events.filter((e) => Boolean(e.capabilityId || e.reusedCapability));
+
+  // Check if redundancy belongs to capability workflows
+  const capHashCounts = {};
+  capEvents.forEach((e) => {
+    if (e.inputHash && e.inputHash !== 'hash_none') {
+      const key = `${e.tool}:${e.inputHash}`;
+      capHashCounts[key] = (capHashCounts[key] || 0) + 1;
+    }
+  });
+
+  const hasCapRedundancy = Object.values(capHashCounts).some((count) => count >= 2);
+
+  if (coreEvents.length === 0) {
+    if (hasCapRedundancy) {
+      return {
+        detected: false,
+        category: 'CAPABILITY_WORKFLOW',
+        reason: 'Redundant operations detected inside capability workflow (CAPABILITY_WORKFLOW). No core self-code proposal generated.',
+        metric: null
+      };
+    }
+    return { detected: false, reason: 'No core EVO action events available.', metric: null };
+  }
+
+  // Group core events by objective
+  const objMap = {};
+  coreEvents.forEach((e) => {
+    const objId = e.objectiveId || 'unknown';
+    if (!objMap[objId]) objMap[objId] = [];
+    objMap[objId].push(e);
+  });
+
+  const objIds = Object.keys(objMap);
+  if (objIds.length < minSessions) {
+    return {
+      detected: false,
+      reason: `Insufficient distinct objectives/sessions for redundant operations (got ${objIds.length}, required >= ${minSessions}).`,
+      metric: null
+    };
+  }
+
+  // Check for repeated identical tool operations (same tool + same inputHash) across objectives
+  const hashObjMap = {};
+  const sampleEvtIds = new Set();
+  let totalOps = 0;
+  let redundantOps = 0;
+
+  coreEvents.forEach((e) => {
+    if (e.inputHash && e.inputHash !== 'hash_none') {
+      totalOps++;
+      const key = `${e.tool}:${e.inputHash}`;
+      if (!hashObjMap[key]) hashObjMap[key] = new Set();
+      hashObjMap[key].add(e.objectiveId);
+      sampleEvtIds.add(e.id);
+    }
+  });
+
+  // Find hash keys that recur across >= minSessions distinct objectives
+  const recurringKeys = Object.keys(hashObjMap).filter((k) => hashObjMap[k].size >= minSessions);
+
+  if (recurringKeys.length === 0) {
+    return {
+      detected: false,
+      reason: `No recurring identical tool operations found across >= ${minSessions} distinct objectives.`,
+      metric: null
+    };
+  }
+
+  // Count total redundant ops for recurring keys
+  coreEvents.forEach((e) => {
+    const key = `${e.tool}:${e.inputHash}`;
+    if (recurringKeys.includes(key)) {
+      redundantOps++;
+    }
+  });
+
+  const redundancyRatio = totalOps > 0 ? Number((redundantOps / totalOps).toFixed(4)) : 0;
+
+  if (redundancyRatio < minRatio) {
+    return {
+      detected: false,
+      reason: `Redundancy ratio ${redundancyRatio} below threshold ${minRatio}.`,
+      metric: null
+    };
+  }
+
+  const metric = {
+    id: `metric_redundant_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+    metricType: 'REDUNDANT_OPERATIONS',
+    affectedComponent: 'plannerService',
+    targetFiles: ['src/services/plannerService.js'],
+    sampleSize: objIds.length,
+    baselineValue: 0,
+    observedValue: redundancyRatio,
+    multiplier: Number((1 + redundancyRatio).toFixed(2)),
+    evidenceIds: Array.from(sampleEvtIds),
+    normalization: { totalOperations: totalOps, redundantOperations: redundantOps, redundancyRatio },
+    timestamp: new Date().toISOString()
+  };
+
+  return {
+    detected: true,
+    metric
+  };
+}
+
 export const actionEventStore = {
   redactSensitiveInputs,
   generateInputHash,
@@ -147,5 +269,7 @@ export const actionEventStore = {
   saveActionEvents,
   recordActionEvent,
   getEventsByObjective,
-  reconstructObjectiveTimeline
+  reconstructObjectiveTimeline,
+  detectRedundantOperations
 };
+

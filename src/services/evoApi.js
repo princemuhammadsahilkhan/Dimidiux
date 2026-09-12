@@ -6,7 +6,8 @@ import {
   updateObjectiveStatus as localUpdateObjectiveStatus,
   setObjectivePlan as localSetObjectivePlan,
   setObjectivePlanningFailed as localSetObjectivePlanningFailed,
-  saveObjectives as localSaveObjectives
+  saveObjectives as localSaveObjectives,
+  subscribeObjectiveUpdates as localSubscribeObjectiveUpdates
 } from './objectiveStore.js';
 import { plannerService as localPlannerService } from './plannerService.js';
 import {
@@ -462,10 +463,357 @@ export const evoApi = {
     return localSkillFactoryService.promoteCandidateSkill(candidateId);
   },
 
+  // Stage 6A Runtime Learning & Self-Observation Loop Facade
+  async getRuntimeLearningRecords(filter) {
+    if (isElectron) {
+      return await window.evoAPI.getRuntimeLearningRecords(filter);
+    }
+    return localEvolutionService.getRuntimeLearningRecords(filter);
+  },
+
+  async getRuntimeLearningRecordByObjective(objectiveId) {
+    if (isElectron) {
+      return await window.evoAPI.getRuntimeLearningRecordByObjective(objectiveId);
+    }
+    return localEvolutionService.getRuntimeLearningRecordByObjective(objectiveId);
+  },
+
+  async getSystemLearningOverview() {
+    if (isElectron) {
+      return await window.evoAPI.getSystemLearningOverview();
+    }
+    return localEvolutionService.getSystemLearningOverview();
+  },
+
+  // Supervised Self-Code Improvement & Versioning Facade (Stage 6B)
+  async getSelfCodeProposals() {
+    if (isElectron) {
+      return await window.evoAPI.getSelfCodeProposals();
+    }
+    return localEvolutionService.getSelfCodeProposals();
+  },
+
+  async approveSelfCodeProposal(proposalId, options) {
+    if (isElectron) {
+      return await window.evoAPI.approveSelfCodeProposal({ proposalId, options });
+    }
+    return localEvolutionService.approveSelfCodeProposal(proposalId, options);
+  },
+
+  async rejectSelfCodeProposal(proposalId, reason) {
+    if (isElectron) {
+      return await window.evoAPI.rejectSelfCodeProposal({ proposalId, reason });
+    }
+    return localEvolutionService.rejectSelfCodeProposal(proposalId, reason);
+  },
+
+  async getSelfCodeVersionState() {
+    if (isElectron) {
+      return await window.evoAPI.getSelfCodeVersionState();
+    }
+    return localEvolutionService.getSelfCodeVersionState();
+  },
+
+  async rollbackSelfCodeVersion(versionId, reason) {
+    if (isElectron) {
+      return await window.evoAPI.rollbackSelfCodeVersion({ versionId, reason });
+    }
+    return localEvolutionService.rollbackSelfCodeVersion(versionId, reason);
+  },
+
+  // Stage 7A Controlled Desktop Observation Facades
+  async getDesktopObservation(options) {
+    if (isElectron) {
+      return await window.evoAPI.getDesktopObservation(options);
+    }
+    return localEvolutionService.getDesktopObservation(options);
+  },
+
+  async getActiveApplication() {
+    if (isElectron) {
+      return await window.evoAPI.getActiveApplication();
+    }
+    return localEvolutionService.getActiveApplication();
+  },
+
+  async getOpenWindows() {
+    if (isElectron) {
+      return await window.evoAPI.getOpenWindows();
+    }
+    return localEvolutionService.getOpenWindows();
+  },
+
+  async getDesktopSnapshot() {
+    if (isElectron) {
+      return await window.evoAPI.getDesktopSnapshot();
+    }
+    return localEvolutionService.getDesktopSnapshot();
+  },
+
+  async getApplicationState(appId) {
+    if (isElectron) {
+      return await window.evoAPI.getApplicationState(appId);
+    }
+    return localEvolutionService.getApplicationState(appId);
+  },
+
+  // Stage 7B Controlled Single-Click Computer Interaction Facades
+  async getPendingClickRequests() {
+    if (isElectron) {
+      return await window.evoAPI.getPendingClickRequests();
+    }
+    return localEvolutionService.getPendingClickRequests();
+  },
+
+  async requestMouseClick(target, options) {
+    if (isElectron) {
+      return await window.evoAPI.requestMouseClick(target, options);
+    }
+    return localEvolutionService.requestMouseClick(target, options);
+  },
+
+  async approveMouseClick(interactionId, options) {
+    if (isElectron) {
+      return await window.evoAPI.approveMouseClick(interactionId, options);
+    }
+    return localEvolutionService.approveMouseClick(interactionId, options);
+  },
+
+  async cancelMouseClick(interactionId, reason) {
+    if (isElectron) {
+      return await window.evoAPI.cancelMouseClick(interactionId, reason);
+    }
+    return localEvolutionService.cancelMouseClick(interactionId, reason);
+  },
+
+  // Stage 7C Visual Target Understanding Facades
+  async identifyClickableTarget(observation, objective, options) {
+    if (isElectron) {
+      return await window.evoAPI.identifyClickableTarget(observation, objective, options);
+    }
+    return localEvolutionService.identifyClickableTarget(observation, objective, options);
+  },
+
+  async validateTargetProposal(proposal, observation) {
+    if (isElectron) {
+      return await window.evoAPI.validateTargetProposal(proposal, observation);
+    }
+    return localEvolutionService.validateTargetProposal(proposal, observation);
+  },
+
+  async createClickProposalFromTarget(visualProposal, options) {
+    if (isElectron) {
+      return await window.evoAPI.createClickProposalFromTarget(visualProposal, options);
+    }
+    return localEvolutionService.createClickProposalFromTarget(visualProposal, options);
+  },
+
+  async getVisualTargetProposals() {
+    if (isElectron) {
+      return await window.evoAPI.getVisualTargetProposals();
+    }
+    return localEvolutionService.getVisualTargetProposals();
+  },
+
+  // Stage 7D Controlled Application Launch Facades
+  async listAllowedApplications() {
+    if (isElectron) {
+      return await window.evoAPI.listAllowedApplications();
+    }
+    return localEvolutionService.listAllowedApplications();
+  },
+
+  async requestApplicationLaunch(applicationId, options) {
+    if (isElectron) {
+      return await window.evoAPI.requestApplicationLaunch(applicationId, options);
+    }
+    return localEvolutionService.requestApplicationLaunch(applicationId, options);
+  },
+
+  async approveApplicationLaunch(requestId, options) {
+    if (isElectron) {
+      return await window.evoAPI.approveApplicationLaunch(requestId, options);
+    }
+    return localEvolutionService.approveApplicationLaunch(requestId, options);
+  },
+
+  async cancelApplicationLaunch(requestId, reason) {
+    if (isElectron) {
+      return await window.evoAPI.cancelApplicationLaunch(requestId, reason);
+    }
+    return localEvolutionService.cancelApplicationLaunch(requestId, reason);
+  },
+
+  async verifyApplicationLaunch(applicationId, observation) {
+    if (isElectron) {
+      return await window.evoAPI.verifyApplicationLaunch(applicationId, observation);
+    }
+    return localEvolutionService.verifyApplicationLaunch(applicationId, observation);
+  },
+
+  async getPendingLaunchRequests() {
+    if (isElectron) {
+      return await window.evoAPI.getPendingLaunchRequests();
+    }
+    return localEvolutionService.getPendingLaunchRequests();
+  },
+
+  // Stage 7E Controlled Supervised Text Input Facades
+  async requestTextInput(target, text, options) {
+    if (isElectron) {
+      return await window.evoAPI.requestTextInput(target, text, options);
+    }
+    return localEvolutionService.requestTextInput(target, text, options);
+  },
+
+  async approveTextInput(requestId, options) {
+    if (isElectron) {
+      return await window.evoAPI.approveTextInput(requestId, options);
+    }
+    return localEvolutionService.approveTextInput(requestId, options);
+  },
+
+  async cancelTextInput(requestId, reason) {
+    if (isElectron) {
+      return await window.evoAPI.cancelTextInput(requestId, reason);
+    }
+    return localEvolutionService.cancelTextInput(requestId, reason);
+  },
+
+  async getPendingTextInputRequests() {
+    if (isElectron) {
+      return await window.evoAPI.getPendingTextInputRequests();
+    }
+    return localEvolutionService.getPendingTextInputRequests();
+  },
+
+  // Stage 7F Controlled Multi-Step Computer Task Facades
+  async createComputerTask(objective, options) {
+    if (isElectron) {
+      return await window.evoAPI.createComputerTask(objective, options);
+    }
+    return localEvolutionService.createComputerTask(objective, options);
+  },
+
+  async planComputerTask(objective) {
+    return localEvolutionService.planComputerTask(objective);
+  },
+
+  async getComputerTask(taskId) {
+    if (isElectron) {
+      return await window.evoAPI.getComputerTask(taskId);
+    }
+    return localEvolutionService.getComputerTask(taskId);
+  },
+
+  async getPendingComputerActions(taskId) {
+    if (isElectron) {
+      return await window.evoAPI.getPendingComputerActions(taskId);
+    }
+    return localEvolutionService.getPendingComputerActions(taskId);
+  },
+
+  async approveComputerAction(taskId, actionId, options) {
+    if (isElectron) {
+      return await window.evoAPI.approveComputerAction(taskId, actionId, options);
+    }
+    return localEvolutionService.approveComputerAction(taskId, actionId, options);
+  },
+
+  async cancelComputerTask(taskId, reason) {
+    if (isElectron) {
+      return await window.evoAPI.cancelComputerTask(taskId, reason);
+    }
+    return localEvolutionService.cancelComputerTask(taskId, reason);
+  },
+
+  async pauseComputerTask(taskId, reason) {
+    return localEvolutionService.pauseComputerTask(taskId, reason);
+  },
+
+  async resumeComputerTask(taskId) {
+    if (isElectron) {
+      return await window.evoAPI.resumeComputerTask(taskId);
+    }
+    return localEvolutionService.resumeComputerTask(taskId);
+  },
+
+  async verifyComputerTask(taskId) {
+    if (isElectron) {
+      return await window.evoAPI.verifyComputerTask(taskId);
+    }
+    return localEvolutionService.verifyComputerTask(taskId);
+  },
+
+  // Stage 8A Scoped Computer Autonomy Facades
+  async requestAutonomyScope(taskId, details) {
+    if (isElectron) {
+      return await window.evoAPI.requestAutonomyScope(taskId, details);
+    }
+    return localEvolutionService.requestAutonomyScope(taskId, details);
+  },
+
+  async approveAutonomyScope(scopeId, options) {
+    if (isElectron) {
+      return await window.evoAPI.approveAutonomyScope(scopeId, options);
+    }
+    return localEvolutionService.approveAutonomyScope(scopeId, options);
+  },
+
+  async revokeAutonomyScope(scopeId, reason) {
+    if (isElectron) {
+      return await window.evoAPI.revokeAutonomyScope(scopeId, reason);
+    }
+    return localEvolutionService.revokeAutonomyScope(scopeId, reason);
+  },
+
+  async getAutonomyScope(identifier) {
+    if (isElectron) {
+      return await window.evoAPI.getAutonomyScope(identifier);
+    }
+    return localEvolutionService.getAutonomyScope(identifier);
+  },
+
+  async getAutonomyScopeHistory() {
+    if (isElectron) {
+      return await window.evoAPI.getAutonomyScopeHistory();
+    }
+    return localEvolutionService.getAutonomyScopeHistory();
+  },
+
+  async planAutonomyScope(taskOrObjective) {
+    if (isElectron) {
+      return await window.evoAPI.planAutonomyScope(taskOrObjective);
+    }
+    return localEvolutionService.planAutonomyScope(taskOrObjective);
+  },
+
+  async validatePlannedScope(scope, taskOrObjective) {
+    if (isElectron) {
+      return await window.evoAPI.validatePlannedScope(scope, taskOrObjective);
+    }
+    return localEvolutionService.validatePlannedScope(scope, taskOrObjective);
+  },
+
+  // Stage 8D Recovery Facades
+  async recoverComputerTask(taskId) {
+    if (isElectron) {
+      return await window.evoAPI.recoverComputerTask(taskId);
+    }
+    return localEvolutionService.recoverComputerTask(taskId);
+  },
+
+  async getRecoveryHistory(taskId) {
+    if (isElectron) {
+      return await window.evoAPI.getRecoveryHistory(taskId);
+    }
+    return localEvolutionService.getRecoveryHistory(taskId);
+  },
+
   onObjectiveUpdated(callback) {
     if (isElectron) {
       return window.evoAPI.onObjectiveUpdated(callback);
     }
-    return () => {};
+    return localSubscribeObjectiveUpdates(callback);
   }
 };

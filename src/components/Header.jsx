@@ -4,6 +4,8 @@ export default function Header({ activeTab, setActiveTab }) {
   const navItems = [
     { id: 'home', label: 'Home' },
     { id: 'objective', label: 'Objective' },
+    { id: 'learning', label: 'Learning' },
+    { id: 'environment', label: 'Environment' },
     { id: 'settings', label: 'Settings' },
   ];
 

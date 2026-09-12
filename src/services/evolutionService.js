@@ -28,6 +28,63 @@ import { getMemories } from './memoryStore.js';
 import { getObjectives, updateObjectiveEvolutionMetadata, setObjectivePlan } from './objectiveStore.js';
 import { plannerService } from './plannerService.js';
 import { evaluationService } from './evaluationService.js';
+import { getEventsByObjective } from './actionEventStore.js';
+import {
+  createSelfCodeProposal,
+  getSelfCodeProposals,
+  getSelfCodeProposalById,
+  rejectSelfCodeProposal
+} from './selfCodeProposalStore.js';
+import {
+  selfCodeSandboxService,
+  validateProposedFilePath,
+  testSelfCodeProposalInSandbox
+} from './selfCodeSandboxService.js';
+import {
+  selfCodeAnalyzerService,
+  classifyProblemCategory,
+  analyzeEvidenceAndGenerateProposal
+} from './selfCodeAnalyzerService.js';
+import {
+  selfCodePromotionService,
+  compareSelfCodeCandidate,
+  checkSelfCodePromotionEligibility,
+  promoteSelfCodeVersion,
+  rollbackSelfCodeVersion
+} from './selfCodePromotionService.js';
+import {
+  getSelfCodeVersionState,
+  getActiveSelfCodeVersion
+} from './selfCodeVersionStore.js';
+import {
+  selfCodeOrchestratorService,
+  runSelfImprovementPipeline,
+  approveSelfCodeProposal
+} from './selfCodeOrchestratorService.js';
+import {
+  getAutonomyPolicy,
+  updateAutonomyPolicy,
+  resetAutonomyPolicyToDefault,
+  getSelfImprovementRuns,
+  getSelfImprovementRunById
+} from './selfCodeOrchestratorStore.js';
+
+import {
+  createRuntimeLearningRecord,
+  getRuntimeLearningRecords,
+  saveRuntimeLearningRecords,
+  getRuntimeLearningRecordByObjective,
+  getRuntimeLearningRecordById,
+  getSystemLearningOverview,
+  LEARNING_CATEGORIES,
+  LEARNING_STATUS
+} from './runtimeLearningStore.js';
+import { isRecursiveOrSelfMetadataEvidence } from './selfCodeOrchestratorService.js';
+import { desktopObservationService } from './desktopObservationService.js';
+import { computerInteractionService } from './computerInteractionService.js';
+import { visualTargetService, validateTargetProposal } from './visualTargetService.js';
+import { applicationControlService } from './applicationControlService.js';
+import { computerTaskService } from './computerTaskService.js';
 
 export const EXECUTION_MODES = {
   NORMAL_PLAN: 'NORMAL_PLAN',
@@ -35,7 +92,7 @@ export const EXECUTION_MODES = {
 };
 
 /**
- * EvolutionService — Orchestrator for Step 8 + Step 9 Lifecycle (Milestone 5)
+ * EvolutionService — Orchestrator for Step 8 + Step 9 + Stage 5/6 Lifecycle
  */
 export class EvolutionService {
   /**
@@ -189,19 +246,25 @@ export class EvolutionService {
   }
 
   /**
-   * 2. Orchestrates Objective Completion (IDEMPOTENT processing, Rule 3)
-   * Processed ONCE per objective ID.
+   * 2. Orchestrates Objective Completion (IDEMPOTENT processing, Stage 6A)
+   * Processed ONCE per objective ID with unified Runtime Learning Loop.
    */
   async handleObjectiveCompletion(objective) {
     if (!objective || !objective.id) return { processed: false, reason: 'Invalid objective object.' };
 
     // Idempotency check: Prevent duplicate processing or recursive loops
     if (isObjectiveProcessedForEvolution(objective.id)) {
-      return { processed: false, reason: 'Objective already processed for evolution.' };
+      const existingRecord = getRuntimeLearningRecordByObjective(objective.id);
+      return {
+        processed: true,
+        alreadyProcessed: true,
+        learningRecord: existingRecord,
+        reason: 'Objective already processed for evolution and runtime learning.'
+      };
     }
 
     // Milestone 7 Critical Rule: Experiments MUST NOT contaminate EVO evolution state!
-    const evoMeta = objective.evolution || {};
+    const evoMeta = objective.evolution || objective.evolutionMetadata || {};
     if (evoMeta.isExperiment) {
       markObjectiveProcessedForEvolution(objective.id);
       return {
@@ -214,17 +277,24 @@ export class EvolutionService {
 
     try {
       const isSuccess = objective.status === 'COMPLETED';
+      const evidenceIds = [];
+      let expResult = null;
+      let evalRecord = null;
+      let failureEvidenceId = null;
+      let proposalId = null;
+      let metricIds = [];
 
       // Step A: Extract Step 8 Experience
-      let expResult = null;
       try {
         expResult = extractExperienceFromObjective(objective);
+        if (expResult && expResult.id) {
+          evidenceIds.push(expResult.id);
+        }
       } catch (e) {
         console.error('EvolutionService: Experience extraction failed:', e);
       }
 
       // Step B: Record Version-Specific Capability Usage (Rule 4 & 6)
-      const evoMeta = objective.evolution || {};
       const reusedCapId = evoMeta.capabilityId;
       const capVersion = evoMeta.capabilityVersion;
 
@@ -261,6 +331,11 @@ export class EvolutionService {
                 timestamp: new Date().toISOString()
               });
 
+              if (evidence && evidence.id) {
+                evidenceIds.push(evidence.id);
+                failureEvidenceId = evidence.id;
+              }
+
               // Generate localized NON-ACTIVE repair candidate
               generateCapabilityRepairCandidate(evidence.id);
             }
@@ -272,7 +347,10 @@ export class EvolutionService {
 
       // Step B2: Record Objective Evaluation (Milestone 6)
       try {
-        evaluationService.recordObjectiveEvaluation(objective);
+        evalRecord = evaluationService.recordObjectiveEvaluation(objective);
+        if (evalRecord && evalRecord.id) {
+          evidenceIds.push(evalRecord.id);
+        }
       } catch (e) {
         console.error('EvolutionService: Objective evaluation recording failed:', e);
       }
@@ -296,6 +374,88 @@ export class EvolutionService {
         this.processCapabilityImprovementsAndRollbacks(reusedCapId, capVersion);
       }
 
+      // Step F: Stage 5F Passive Performance & Quality Metric Aggregation
+      try {
+        const perfMetrics = selfCodeAnalyzerService.collectPerformanceQualityMetrics();
+        if (Array.isArray(perfMetrics) && perfMetrics.length > 0) {
+          metricIds = perfMetrics.map((m) => m.id);
+        }
+
+        const objEvents = getEventsByObjective(objective.id) || [];
+        const perfEvents = objEvents.filter((e) =>
+          e.actionType === 'DURATION_REGRESSION' ||
+          e.actionType === 'PLANNING_OVERHEAD' ||
+          e.actionType === 'REDUNDANT_OPERATIONS' ||
+          e.status === 'WARNING'
+        );
+        if (perfEvents.length > 0) {
+          const perfEventIds = perfEvents.map((e) => e.id);
+          metricIds = Array.from(new Set([...metricIds, ...perfEventIds]));
+        }
+      } catch (perfErr) {
+        console.error('EvolutionService: Performance metric collection failed:', perfErr);
+      }
+
+      // Step G: Stage 5B / 5F Self-Code Analysis Check & Recursion Safeguard
+      try {
+        const isRecursive = isRecursiveOrSelfMetadataEvidence(objective);
+        if (!isRecursive) {
+          const proposalRes = selfCodeAnalyzerService.analyzeEvidenceAndGenerateProposal();
+          if (proposalRes && proposalRes.generated && proposalRes.proposal) {
+            proposalId = proposalRes.proposal.id;
+          }
+        }
+      } catch (anaErr) {
+        console.error('EvolutionService: Self-code analysis failed:', anaErr);
+      }
+
+      // Step H: Construct & Save Runtime Learning Record
+      let category = LEARNING_CATEGORIES.USER_EXECUTION;
+      if (proposalId) {
+        category = LEARNING_CATEGORIES.SELF_CODE_ANALYSIS;
+      } else if (metricIds.length > 0) {
+        category = LEARNING_CATEGORIES.PERFORMANCE_DIAGNOSIS;
+      } else if (reusedCapId) {
+        category = LEARNING_CATEGORIES.CAPABILITY_LEARNING;
+      }
+
+      const autonomyPolicy = getAutonomyPolicy();
+      const proposalGenerated = Boolean(proposalId);
+      const approvalRequired = proposalGenerated && autonomyPolicy.mode === 'SUPERVISED';
+
+      const startedAt = objective.createdAt || new Date().toISOString();
+      const completedAt = objective.updatedAt || new Date().toISOString();
+      const startMs = new Date(startedAt).getTime();
+      const endMs = new Date(completedAt).getTime();
+      const executionDurationMs = Math.max(0, endMs - startMs);
+
+      const learningRecord = createRuntimeLearningRecord({
+        objectiveId: objective.id,
+        goal: objective.goal || '',
+        category,
+        evidenceIds,
+        capabilityId: reusedCapId || null,
+        capabilityVersion: capVersion || null,
+        evaluationId: evalRecord ? evalRecord.id : null,
+        performanceMetricIds: metricIds,
+        selfCodeProposalId: proposalId,
+        timestamps: {
+          startedAt,
+          completedAt
+        },
+        status: isSuccess ? LEARNING_STATUS.COMPLETED : LEARNING_STATUS.FAILED,
+        summary: {
+          success: isSuccess,
+          executionMode: evoMeta.executionMode || 'NORMAL_PLAN',
+          executionDurationMs,
+          stepCount: Array.isArray(objective.plan) ? objective.plan.length : 0,
+          experienceCreated: Boolean(expResult),
+          evaluationResult: evalRecord ? evalRecord.evaluationResult : null,
+          proposalGenerated,
+          approvalRequired
+        }
+      });
+
       // Mark objective as processed (IDEMPOTENT persistence)
       markObjectiveProcessedForEvolution(objective.id);
 
@@ -303,11 +463,11 @@ export class EvolutionService {
         processed: true,
         objectiveId: objective.id,
         status: objective.status,
-        experienceRecorded: Boolean(expResult)
+        experienceRecorded: Boolean(expResult),
+        learningRecord
       };
     } catch (err) {
       console.error('EvolutionService error during objective completion:', err);
-      // Evolution failure MUST NOT corrupt objective or execution state (Rule 13)
       return { processed: false, error: err.message };
     }
   }
@@ -371,7 +531,311 @@ export class EvolutionService {
   }
 
   /**
-   * 5. Returns High-Level Evolution System Overview
+   * 5. Stage 5A: Self-Code Improvement Proposal & Sandbox Testing
+   */
+  createSelfCodeProposal(data) {
+    return createSelfCodeProposal(data);
+  }
+
+  getSelfCodeProposals() {
+    return getSelfCodeProposals();
+  }
+
+  testSelfCodeProposalInSandbox(proposalIdOrObj, options = {}) {
+    return testSelfCodeProposalInSandbox(proposalIdOrObj, options);
+  }
+
+  validateProposedFilePath(filePath) {
+    return validateProposedFilePath(filePath);
+  }
+
+  /**
+   * 6. Stage 5B: Autonomous Self-Code Improvement Proposal Generation
+   */
+  classifyProblemCategory(evidenceOrError) {
+    return classifyProblemCategory(evidenceOrError);
+  }
+
+  analyzeEvidenceAndGenerateProposal(evidenceList = [], options = {}) {
+    return analyzeEvidenceAndGenerateProposal(evidenceList, options);
+  }
+
+  /**
+   * 7. Stage 5C: Controlled Self-Code Promotion, Comparison, Versioning, and Rollback
+   */
+  compareSelfCodeCandidate(proposalIdOrObj, options = {}) {
+    return compareSelfCodeCandidate(proposalIdOrObj, options);
+  }
+
+  checkSelfCodePromotionEligibility(proposalIdOrObj, options = {}) {
+    return checkSelfCodePromotionEligibility(proposalIdOrObj, options);
+  }
+
+  promoteSelfCodeVersion(proposalIdOrObj, options = {}) {
+    return promoteSelfCodeVersion(proposalIdOrObj, options);
+  }
+
+  rollbackSelfCodeVersion(versionIdOrOptions, reasonStr) {
+    return rollbackSelfCodeVersion(versionIdOrOptions, reasonStr);
+  }
+
+  getSelfCodeVersionState() {
+    return getSelfCodeVersionState();
+  }
+
+  getActiveSelfCodeVersion() {
+    return getActiveSelfCodeVersion();
+  }
+
+  /**
+   * 8. Stage 5D: Autonomous Self-Improvement Orchestration
+   */
+  async runSelfImprovementPipeline(evidenceList = [], options = {}) {
+    return runSelfImprovementPipeline(evidenceList, options);
+  }
+
+  approveSelfCodeProposal(proposalId, options = {}) {
+    return approveSelfCodeProposal(proposalId, options);
+  }
+
+  rejectSelfCodeProposal(proposalId, reason = 'Operator rejected proposal') {
+    return rejectSelfCodeProposal(proposalId, reason);
+  }
+
+  getAutonomyPolicy() {
+    return getAutonomyPolicy();
+  }
+
+  updateAutonomyPolicy(updates = {}) {
+    return updateAutonomyPolicy(updates);
+  }
+
+  resetAutonomyPolicyToDefault() {
+    return resetAutonomyPolicyToDefault();
+  }
+
+  getSelfImprovementRuns() {
+    return getSelfImprovementRuns();
+  }
+
+  getSelfImprovementRunById(id) {
+    return getSelfImprovementRunById(id);
+  }
+
+  /**
+   * Stage 6A Runtime Learning Facades
+   */
+  getRuntimeLearningRecords(filter = null) {
+    return getRuntimeLearningRecords(filter);
+  }
+
+  getRuntimeLearningRecordByObjective(objectiveId) {
+    return getRuntimeLearningRecordByObjective(objectiveId);
+  }
+
+  getRuntimeLearningRecordById(id) {
+    return getRuntimeLearningRecordById(id);
+  }
+
+  getSystemLearningOverview() {
+    return getSystemLearningOverview();
+  }
+
+  /**
+   * Stage 7A Desktop Observation Facades
+   */
+  getDesktopObservation(options = {}) {
+    return desktopObservationService.getDesktopObservation(options);
+  }
+
+  getActiveApplication() {
+    return desktopObservationService.getActiveApplication();
+  }
+
+  getOpenWindows() {
+    return desktopObservationService.getOpenWindows();
+  }
+
+  getDesktopSnapshot() {
+    return desktopObservationService.getDesktopSnapshot();
+  }
+
+  getApplicationState(applicationId) {
+    return desktopObservationService.getApplicationState(applicationId);
+  }
+
+  /**
+   * Stage 7B Controlled Single-Click Computer Interaction Facades
+   */
+  requestMouseClick(target, options = {}) {
+    return computerInteractionService.requestMouseClick(target, options);
+  }
+
+  approveMouseClick(interactionId, options = {}) {
+    return computerInteractionService.approveMouseClick(interactionId, options);
+  }
+
+  cancelMouseClick(interactionId, reason) {
+    return computerInteractionService.cancelMouseClick(interactionId, reason);
+  }
+
+  getPendingClickRequests() {
+    return computerInteractionService.getPendingClickRequests();
+  }
+
+  getInteractionHistory() {
+    return computerInteractionService.getInteractionHistory();
+  }
+
+  /**
+   * Stage 7C Visual Target Understanding Facades
+   */
+  identifyClickableTarget(observation, objective, options = {}) {
+    return visualTargetService.identifyClickableTarget(observation, objective, options);
+  }
+
+  validateTargetProposal(proposal, observation) {
+    return validateTargetProposal(proposal, observation);
+  }
+
+  createClickProposalFromTarget(visualProposal, options = {}) {
+    return computerInteractionService.createClickProposalFromTarget(visualProposal, options);
+  }
+
+  getVisualTargetProposals() {
+    return visualTargetService.getProposalHistory();
+  }
+
+  /**
+   * Stage 7D Controlled Application Launch Facades
+   */
+  listAllowedApplications() {
+    return applicationControlService.listAllowedApplications();
+  }
+
+  requestApplicationLaunch(applicationId, options = {}) {
+    return applicationControlService.requestApplicationLaunch(applicationId, options);
+  }
+
+  approveApplicationLaunch(requestId, options = {}) {
+    return applicationControlService.approveApplicationLaunch(requestId, options);
+  }
+
+  cancelApplicationLaunch(requestId, reason) {
+    return applicationControlService.cancelApplicationLaunch(requestId, reason);
+  }
+
+  verifyApplicationLaunch(applicationId, observation) {
+    return applicationControlService.verifyApplicationLaunch(applicationId, observation);
+  }
+
+  getPendingLaunchRequests() {
+    return applicationControlService.getPendingLaunchRequests();
+  }
+
+  /**
+   * Stage 7E Controlled Supervised Text Input Facades
+   */
+  requestTextInput(target, text, options = {}) {
+    return computerInteractionService.requestTextInput(target, text, options);
+  }
+
+  approveTextInput(requestId, options = {}) {
+    return computerInteractionService.approveTextInput(requestId, options);
+  }
+
+  cancelTextInput(requestId, reason) {
+    return computerInteractionService.cancelTextInput(requestId, reason);
+  }
+
+  verifyTextInput(target, expectedText, observation) {
+    return computerInteractionService.verifyTextInput(target, expectedText, observation);
+  }
+
+  getPendingTextInputRequests() {
+    return computerInteractionService.getPendingTextInputRequests();
+  }
+
+  /**
+   * Stage 7F Controlled Multi-Step Computer Task Facades
+   */
+  createComputerTask(objective, options = {}) {
+    return computerTaskService.createComputerTask(objective, options);
+  }
+
+  planComputerTask(objective) {
+    return computerTaskService.planComputerTask(objective);
+  }
+
+  getComputerTask(taskId) {
+    return computerTaskService.getComputerTask(taskId);
+  }
+
+  getPendingComputerActions(taskId = null) {
+    return computerTaskService.getPendingComputerActions(taskId);
+  }
+
+  approveComputerAction(taskId, actionId, options = {}) {
+    return computerTaskService.approveComputerAction(taskId, actionId, options);
+  }
+
+  cancelComputerTask(taskId, reason) {
+    return computerTaskService.cancelComputerTask(taskId, reason);
+  }
+
+  pauseComputerTask(taskId, reason) {
+    return computerTaskService.pauseComputerTask(taskId, reason);
+  }
+
+  resumeComputerTask(taskId) {
+    return computerTaskService.resumeComputerTask(taskId);
+  }
+
+  verifyComputerTask(taskId) {
+    return computerTaskService.verifyComputerTask(taskId);
+  }
+
+  /**
+   * Stage 8A Scoped Computer Autonomy Policy Facades
+   */
+  requestAutonomyScope(taskId, details = {}) {
+    return computerTaskService.requestAutonomyScope(taskId, details);
+  }
+
+  approveAutonomyScope(scopeId, options = {}) {
+    return computerTaskService.approveAutonomyScope(scopeId, options);
+  }
+
+  revokeAutonomyScope(scopeId, reason = 'Operator revocation') {
+    return computerTaskService.revokeAutonomyScope(scopeId, reason);
+  }
+
+  getAutonomyScope(identifier = null) {
+    return computerTaskService.getAutonomyScope(identifier);
+  }
+
+  getAutonomyScopeHistory() {
+    return computerTaskService.getAutonomyScopeHistory();
+  }
+
+  planAutonomyScope(taskOrObjective) {
+    return computerTaskService.planAutonomyScope(taskOrObjective);
+  }
+
+  validatePlannedScope(scope, taskOrObjective) {
+    return computerTaskService.validatePlannedScope(scope, taskOrObjective);
+  }
+
+  recoverComputerTask(taskId) {
+    return computerTaskService.recoverComputerTask(taskId);
+  }
+
+  getRecoveryHistory(taskId = null) {
+    return computerTaskService.getRecoveryHistory(taskId);
+  }
+
+  /**
+   * 8. Returns High-Level Evolution System Overview
    */
   getEvolutionOverview() {
     const memories = getMemories();

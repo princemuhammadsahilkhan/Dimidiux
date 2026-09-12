@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import Header from './components/Header';
 import HomeScreen from './components/HomeScreen';
 import ObjectiveScreen from './components/ObjectiveScreen';
+import LearningScreen from './components/LearningScreen';
+import EnvironmentScreen from './components/EnvironmentScreen';
 import SettingsScreen from './components/SettingsScreen';
 import { evoApi } from './services/evoApi';
 
@@ -118,6 +120,8 @@ export default function App() {
             onRetryExecution={handleRetryExecution}
           />
         )}
+        {activeTab === 'learning' && <LearningScreen />}
+        {activeTab === 'environment' && <EnvironmentScreen />}
         {activeTab === 'settings' && <SettingsScreen />}
       </main>
     </div>
