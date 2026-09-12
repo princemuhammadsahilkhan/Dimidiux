@@ -543,7 +543,7 @@ export class ComputerTaskService {
     const afterObs = desktopObservationService.getDesktopObservation({ audit: false });
     task.afterObservationId = afterObs.observationId;
 
-    if (execResult && execResult.success) {
+    if (execResult && execResult.success && execResult.verified !== false) {
       step.status = 'COMPLETED';
       step.result = execResult;
 

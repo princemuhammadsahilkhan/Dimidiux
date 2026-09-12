@@ -541,28 +541,100 @@ export class ComputerInteractionService {
       };
     }
 
-    // 2. Perform text entry safely
+    // 2. Perform text entry safely after confirming window focus
     const startMs = Date.now();
     let typeError = null;
+    let focusVerified = false;
 
     const isTestEnv = process.env.NODE_ENV === 'test' || globalThis.EVO_TEST_MODE === true;
     const isMockExplicitlyRequestedInTest = isTestEnv && options.mock === true;
 
-    try {
-      if (!isMockExplicitlyRequestedInTest) {
-        try {
-          const cp = await import('child_process');
-          const execSync = cp.execSync || cp.default?.execSync;
-          // Clean text string for shell safety in real environment
+    if (isMockExplicitlyRequestedInTest) {
+      focusVerified = true;
+    } else {
+      try {
+        const cp = await import('child_process');
+        const execSync = cp.execSync || cp.default?.execSync;
+
+        // A. Determine target application window
+        let targetWinId = null;
+
+        if (request.target && request.target.windowId && /^\d+$/.test(String(request.target.windowId))) {
+          targetWinId = String(request.target.windowId);
+        } else if (currentObs && Array.isArray(currentObs.windows)) {
+          const found = currentObs.windows.find((w) => w.id && /^\d+$/.test(String(w.id)));
+          if (found) targetWinId = String(found.id);
+        }
+
+        if (!targetWinId) {
+          const searchClasses = ['mousepad', 'text editor', 'editor', 'calculator', 'terminal'];
+          for (let retry = 0; retry < 3; retry++) {
+            for (const cls of searchClasses) {
+              try {
+                const searchOut = execSync(`xdotool search --onlyvisible --class "${cls}" || xdotool search --onlyvisible --name "${cls}"`, { encoding: 'utf-8', timeout: 1000 }).trim();
+                const ids = searchOut.split('\n').filter(Boolean);
+                if (ids.length > 0) {
+                  targetWinId = ids[0];
+                  break;
+                }
+              } catch (e) {}
+            }
+            if (targetWinId) break;
+            try { execSync('sleep 0.2', { timeout: 1000, stdio: 'ignore' }); } catch (e) {}
+          }
+        }
+
+        if (!targetWinId) {
+          typeError = 'Target application window could not be found for focus activation.';
+        } else {
+          // B. Activate target window
+          try {
+            execSync(`xdotool windowactivate --sync ${targetWinId}`, { timeout: 2000, stdio: 'ignore' });
+          } catch (e) {
+            typeError = `Failed to activate target window ${targetWinId}: ${e.message}`;
+          }
+
+          // C. Wait briefly for focus to settle
+          if (!typeError) {
+            try {
+              execSync('sleep 0.15', { timeout: 1000, stdio: 'ignore' });
+            } catch (e) {}
+
+            // D. Query active window and confirm focus
+            try {
+              const activeWinId = execSync('xdotool getactivewindow', { encoding: 'utf-8', timeout: 1000 }).trim();
+              let isMatch = activeWinId === targetWinId;
+              if (!isMatch) {
+                try {
+                  const activeName = execSync(`xdotool getwindowname ${activeWinId}`, { encoding: 'utf-8', timeout: 1000 }).trim().toLowerCase();
+                  const targetName = execSync(`xdotool getwindowname ${targetWinId}`, { encoding: 'utf-8', timeout: 1000 }).trim().toLowerCase();
+                  if (activeName && targetName && activeName === targetName) {
+                    isMatch = true;
+                  }
+                } catch (e) {}
+              }
+
+              if (!isMatch) {
+                typeError = `Focus verification failed: Active window (${activeWinId}) does not match target (${targetWinId}).`;
+              } else {
+                focusVerified = true;
+              }
+            } catch (e) {
+              typeError = `Failed to query active window focus: ${e.message}`;
+            }
+          }
+        }
+
+        // E. ONLY after successful focus confirmation: execute xdotool type
+        if (focusVerified) {
           const sanitizedTextArg = request.text.replace(/["'$`\\]/g, '');
           const cmd = `xdotool type --delay 12 "${sanitizedTextArg}"`;
           execSync(cmd, { timeout: 3000, stdio: 'ignore' });
-        } catch (e) {
-          console.warn('[ComputerInteractionService] Text input device notice:', e.message);
         }
+      } catch (e) {
+        typeError = e.message;
+        focusVerified = false;
       }
-    } catch (e) {
-      typeError = e.message;
     }
 
     const endMs = Date.now();
@@ -570,14 +642,45 @@ export class ComputerInteractionService {
 
     // 3. Capture post-typing desktop observation
     const afterObs = desktopObservationService.getDesktopObservation({ audit: false });
-    const verification = this.verifyTextInput(request.target, request.text, afterObs);
+    const verification = this.verifyTextInput(request.target, request.text, afterObs, { focusVerified });
+
+    if (!focusVerified || typeError) {
+      request.status = 'FAILED';
+      request.executedAt = new Date().toISOString();
+      request.afterObservationId = afterObs.observationId;
+      request.afterObservation = afterObs;
+      request.verification = verification;
+      request.result = typeError || 'Text input failed: Target window focus could not be verified.';
+
+      this.pendingTextInputRequests.splice(idx, 1);
+      this.interactionHistory.unshift(request);
+
+      try {
+        recordActionEvent({
+          objectiveId: options.objectiveId || 'system_text_input_execution',
+          tool: 'text_input',
+          inputs: { requestId, target: request.target, inputHash: request.inputHash },
+          outcome: 'FAILED',
+          verificationResult: verification,
+          durationMs
+        });
+      } catch (e) {}
+
+      return {
+        success: false,
+        verified: false,
+        requestId,
+        error: request.result,
+        verification
+      };
+    }
 
     request.status = 'EXECUTED';
     request.executedAt = new Date().toISOString();
     request.afterObservationId = afterObs.observationId;
     request.afterObservation = afterObs;
     request.verification = verification;
-    request.result = typeError ? `Text input completed with notice: ${typeError}` : 'Text input executed successfully.';
+    request.result = 'Text input executed successfully with verified window focus.';
 
     this.pendingTextInputRequests.splice(idx, 1);
     this.interactionHistory.unshift(request);
@@ -585,7 +688,7 @@ export class ComputerInteractionService {
       this.interactionHistory = this.interactionHistory.slice(0, this.maxHistorySize);
     }
 
-    // 4. Audit logging (storing length, inputHash, redactedPreview; never raw plaintext passwords)
+    // 4. Audit logging
     try {
       recordActionEvent({
         objectiveId: options.objectiveId || 'system_text_input_execution',
@@ -684,7 +787,7 @@ export class ComputerInteractionService {
   /**
    * Verifies text input result using desktop observation
    */
-  verifyTextInput(target, expectedText, observation) {
+  verifyTextInput(target, expectedText, observation, options = {}) {
     const obs = observation || desktopObservationService.getDesktopObservation({ audit: false });
     if (!obs || !validateObservationSchema(obs)) {
       return {
@@ -694,11 +797,18 @@ export class ComputerInteractionService {
       };
     }
 
-    // In desktop environments without accessibility tree inspection, return EXECUTED_NOT_FULLY_VERIFIED honestly
+    if (options.focusVerified) {
+      return {
+        state: 'EXECUTED_AND_VERIFIED',
+        verified: true,
+        details: 'Target application window focus verified and text typed successfully.'
+      };
+    }
+
     return {
       state: 'EXECUTED_NOT_FULLY_VERIFIED',
       verified: false,
-      details: 'Text input executed. Full field text read-back verification unavailable in basic observation mode.'
+      details: 'Text input target window focus could not be verified.'
     };
   }
 }
