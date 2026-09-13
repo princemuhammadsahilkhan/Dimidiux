@@ -286,7 +286,11 @@ export function extractGoalParameters(goalText) {
 
   const fileMatch = g.match(/(?:file)\s+(?:called|named)?\s*["`']?([a-zA-Z0-9_\-\.\/]+)/i);
   if (fileMatch) {
-    file = fileMatch[1];
+    const rawCandidate = fileMatch[1].replace(/[.!?,"';:]+$/g, '').trim();
+    const isNonFilePhrase = /^(manager|explorer|system|dialog|picker|browser|application|app)$/i.test(rawCandidate);
+    if (!isNonFilePhrase) {
+      file = rawCandidate;
+    }
   }
 
   // Quoted content first
@@ -326,6 +330,46 @@ export function extractGoalParameters(goalText) {
   return { folder, file, content, text };
 }
 
+export function isComputerGoalIntent(goalText) {
+  if (!goalText || typeof goalText !== 'string') return false;
+  const gLower = goalText.toLowerCase();
+
+  const computerKeywords = [
+    'text editor', 'editor application', 'launch application', 'open application',
+    'calculator', 'terminal', 'firefox', 'chromium', 'chrome', 'vscode', 'visual studio code',
+    'code', 'file manager', 'thunar', 'nautilus', 'browser', 'gui save', 'launch',
+    'open firefox', 'open visual studio code', 'open file manager', 'open calculator',
+    'open terminal', 'open text editor'
+  ];
+
+  if (computerKeywords.some((k) => gLower.includes(k))) {
+    return true;
+  }
+
+  try {
+    const res = resolveApplicationByNameSync(goalText);
+    if (res && res.success && res.application) {
+      return true;
+    }
+  } catch (e) {}
+
+  return false;
+}
+
+export function isFilesystemGoalIntent(goalText) {
+  if (!goalText || typeof goalText !== 'string') return false;
+  const gLower = goalText.toLowerCase();
+
+  const fsKeywords = [
+    'create folder', 'create directory', 'make folder', 'make directory',
+    'write file', 'read file', 'copy file', 'move file', 'rename file',
+    'delete file', 'delete directory', 'list directory', 'organize directory',
+    'create a file', 'read a file'
+  ];
+
+  return fsKeywords.some((k) => gLower.includes(k));
+}
+
 /**
  * Deterministic capability matching against VALIDATED capabilities (Step 9 — Milestone 3)
  */
@@ -351,11 +395,59 @@ export function matchCapabilities(goalText) {
   let bestMatch = null;
   let highestScore = 0;
 
+  const isCompGoal = isComputerGoalIntent(goalText);
+  const isFsGoal = isFilesystemGoalIntent(goalText);
+
   for (const cap of capabilities) {
     const schemaCheck = validateCapabilitySchema(cap);
     if (!schemaCheck.valid) continue;
     const actionCheck = validateCandidateActions(cap.workflowSteps);
     if (!actionCheck.valid) continue;
+
+    // Action Domain Classification
+    const isComputerCap = cap.workflowSteps.some((s) => {
+      const type = typeof s.action === 'string' ? s.action : (s.action && s.action.type);
+      return ['OBSERVE', 'LAUNCH_APPLICATION', 'CLICK', 'TEXT_INPUT', 'GUI_SAVE', 'VERIFY'].includes(type);
+    });
+
+    const isFilesystemCap = cap.workflowSteps.some((s) => {
+      const type = typeof s.action === 'string' ? s.action : (s.action && s.action.type);
+      return ['create_directory', 'write_file', 'read_file', 'copy_file', 'move_file', 'rename_file', 'delete_file', 'delete_directory', 'list_directory'].includes(type);
+    });
+
+    const isPureComputerCap = isComputerCap && !isFilesystemCap;
+    const isPureFilesystemCap = isFilesystemCap && !isComputerCap;
+
+    // GATE A: Computer objective + purely filesystem capability -> REJECT
+    if (isCompGoal && isPureFilesystemCap) {
+      continue;
+    }
+
+    // GATE B: Filesystem objective + purely computer capability -> REJECT
+    if (isFsGoal && isPureComputerCap) {
+      continue;
+    }
+
+    // GATE D: Multi-application launch objective count gate
+    const clauseSplits = goalText.split(/\s*(?:,\s*then\s+|;\s*then\s+|\s+then\s+|\s+and\s+finally\s+|\s+and\s+then\s+|,\s*and\s+|\s+and\s+|,|\.)\s*/i).filter(Boolean);
+    const requestedAppClauses = clauseSplits.filter(clause => {
+      const cLower = clause.toLowerCase().trim();
+      return cLower.includes('launch') || cLower.includes('open') || cLower.includes('start') ||
+             cLower.includes('editor') || cLower.includes('calculator') || cLower.includes('terminal') ||
+             cLower.includes('firefox') || cLower.includes('code') || cLower.includes('file manager') ||
+             cLower.includes('browser') || cLower.includes('calc');
+    });
+
+    if (requestedAppClauses.length > 1 && isComputerCap) {
+      const capLaunchCount = cap.workflowSteps.filter((s) => {
+        const type = typeof s.action === 'string' ? s.action : (s.action && s.action.type);
+        return type === 'LAUNCH_APPLICATION';
+      }).length;
+
+      if (capLaunchCount < requestedAppClauses.length) {
+        continue;
+      }
+    }
 
     let score = 0;
     const reasons = [];
@@ -374,8 +466,8 @@ export function matchCapabilities(goalText) {
       reasons.push(`Goal text matches capability tokens: [${commonTokens.join(', ')}].`);
     }
 
-    const hasFolderInGoal = Boolean(params.folder || goalLower.includes('folder') || goalLower.includes('directory') || goalLower.includes('organize'));
-    const hasFileInGoal = Boolean(params.file || goalLower.includes('file'));
+    const hasFolderInGoal = Boolean(params.folder || (isFsGoal && (goalLower.includes('folder') || goalLower.includes('directory') || goalLower.includes('organize'))));
+    const hasFileInGoal = Boolean(params.file || (isFsGoal && goalLower.includes('file')));
 
     const hasFolderStep = cap.workflowSteps.some((s) => {
       const type = typeof s.action === 'string' ? s.action : (s.action && s.action.type);
@@ -393,20 +485,6 @@ export function matchCapabilities(goalText) {
     if (hasFileInGoal && (hasFileStep || hasFolderStep)) {
       score += 0.35;
       reasons.push('File operation intent matches validated workflow.');
-    }
-
-    const isComputerGoalIntent = goalLower.includes('text editor') || goalLower.includes('editor application') ||
-                                 goalLower.includes('launch application') || goalLower.includes('open application') ||
-                                 goalLower.includes('calculator') || goalLower.includes('terminal');
-
-    // Computer Capability Matching Logic
-    const isComputerCap = cap.workflowSteps.some((s) => {
-      const type = typeof s.action === 'string' ? s.action : (s.action && s.action.type);
-      return ['OBSERVE', 'LAUNCH_APPLICATION', 'CLICK', 'TEXT_INPUT', 'VERIFY'].includes(type);
-    });
-
-    if (isComputerGoalIntent && !isComputerCap) {
-      continue;
     }
 
     if (isComputerCap) {
@@ -434,12 +512,7 @@ export function matchCapabilities(goalText) {
         appMatchesGoal = goalLower.includes(cleanAppName);
       }
 
-      const isComputerGoal = goalLower.includes('open') || goalLower.includes('editor') ||
-                             goalLower.includes('write') || goalLower.includes('type') ||
-                             goalLower.includes('click') || goalLower.includes('verify') ||
-                             goalLower.includes('calculator') || goalLower.includes('calc');
-
-      if (isComputerGoal && appMatchesGoal && !appContradiction) {
+      if (isCompGoal && appMatchesGoal && !appContradiction) {
         const hasWriteInGoal = goalLower.includes('write') || goalLower.includes('type') || goalLower.includes('note') || goalLower.includes('input');
         const hasClickInGoal = goalLower.includes('click');
         const hasVerifyInGoal = goalLower.includes('verify');

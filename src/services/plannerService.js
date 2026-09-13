@@ -1,5 +1,6 @@
 import { searchMemory } from './memoryService.js';
 import { planComputerTask } from './computerTaskService.js';
+import { isComputerGoalIntent } from './capabilityService.js';
 
 export const RECOGNIZED_ACTIONS = [
   'list_directory',
@@ -17,7 +18,10 @@ export const RECOGNIZED_ACTIONS = [
   'LAUNCH_APPLICATION',
   'CLICK',
   'TEXT_INPUT',
-  'VERIFY'
+  'GUI_SAVE',
+  'VERIFY',
+  'CLOSE_WINDOW',
+  'CLOSE_APPLICATION'
 ];
 
 /**
@@ -76,11 +80,11 @@ export function validatePlanSchema(planData) {
       if (step.action.path === undefined || typeof step.action.path !== 'string') {
         return { valid: false, error: `Step "${step.id}" action path must be a string.` };
       }
-    } else if (t === 'write_file') {
+    } else if (t === 'write_file' || t === 'GUI_SAVE') {
       if (step.action.path === undefined || typeof step.action.path !== 'string') {
         return { valid: false, error: `Step "${step.id}" action path must be a string.` };
       }
-      if (step.action.content === undefined || typeof step.action.content !== 'string') {
+      if (t === 'write_file' && (step.action.content === undefined || typeof step.action.content !== 'string')) {
         return { valid: false, error: `Step "${step.id}" action content must be a string.` };
       }
     } else if (t === 'copy_file' || t === 'move_file') {
@@ -129,11 +133,7 @@ export class LocalDeterministicPlannerProvider {
       targetSubfolder = 'Research/Articles';
     }
 
-    const isComputerGoalIntent = gLower.includes('text editor') || gLower.includes('editor application') ||
-                                 gLower.includes('launch application') || gLower.includes('open application') ||
-                                 gLower.includes('calculator') || gLower.includes('terminal');
-
-    if (isComputerGoalIntent) {
+    if (isComputerGoalIntent(g)) {
       const computerTask = planComputerTask(g);
       stepsData = computerTask.steps.map((s) => ({
         title: s.description || `Execute ${s.type}`,

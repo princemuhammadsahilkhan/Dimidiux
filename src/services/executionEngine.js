@@ -44,7 +44,10 @@ export function isHostActionRequired(action) {
     'LAUNCH_APPLICATION',
     'CLICK',
     'TEXT_INPUT',
+    'GUI_SAVE',
     'OBSERVE',
+    'CLOSE_WINDOW',
+    'CLOSE_APPLICATION',
     'run_constrained_command'
   ];
 
@@ -211,11 +214,23 @@ export async function verifyToolResult(actionType, result, root = fsConfig.works
   }
 
   if (actionType === 'LAUNCH_APPLICATION') {
-    if (!result || !result.success) {
-      return { verified: false, error: result.error || 'LAUNCH_APPLICATION failed.' };
+    if (!result || result.success !== true) {
+      return { verified: false, error: result?.error || 'LAUNCH_APPLICATION failed.' };
     }
-    if (result.verification && result.verification.verified === false) {
-      return { verified: false, error: result.verification.details || 'Application launch verification failed.' };
+    const isExplicitlyVerified = result.verified === true || (result.verification && result.verification.verified === true);
+    if (!isExplicitlyVerified) {
+      return { verified: false, error: result?.error || result?.verification?.details || 'Application launch target verification failed or missing.' };
+    }
+    return { verified: true };
+  }
+
+  if (actionType === 'CLOSE_WINDOW' || actionType === 'CLOSE_APPLICATION') {
+    if (!result || result.success !== true) {
+      return { verified: false, error: result?.error || `${actionType} failed.` };
+    }
+    const isExplicitlyVerified = result.verified === true || (result.verification && result.verification.verified === true);
+    if (!isExplicitlyVerified) {
+      return { verified: false, error: result?.error || result?.verification?.details || `${actionType} verification failed.` };
     }
     return { verified: true };
   }
@@ -230,6 +245,33 @@ export async function verifyToolResult(actionType, result, root = fsConfig.works
   if (actionType === 'TEXT_INPUT') {
     if (!result || !result.success) {
       return { verified: false, error: result.error || 'TEXT_INPUT failed.' };
+    }
+    return { verified: true };
+  }
+
+  if (actionType === 'GUI_SAVE') {
+    if (!result || !result.success) {
+      return { verified: false, error: result?.error || 'GUI_SAVE execution failed.' };
+    }
+    if (result.guiSaved !== true || result.dirtyCleared !== true) {
+      return { verified: false, error: 'GUI_SAVE verification failed: Document state indicates document remains unsaved in application.' };
+    }
+    const checkPath = action?.path || action?.filePath || result.path;
+    const checkContent = action?.expectedContent !== undefined ? action.expectedContent : action?.content;
+
+    if (checkPath && checkContent !== null && checkContent !== undefined) {
+      try {
+        const readRes = await readFile(checkPath, root);
+        if (!readRes || !readRes.success) {
+          return { verified: false, error: `GUI_SAVE failed: Saved file "${checkPath}" does not exist or cannot be read.` };
+        }
+        if (readRes.content.trim() !== String(checkContent).trim()) {
+          return { verified: false, error: `GUI_SAVE failed: Saved file content mismatch on disk. Expected "${checkContent}", but got "${readRes.content}".` };
+        }
+        return { verified: true, guiSaved: true, dirtyCleared: true, path: checkPath };
+      } catch (err) {
+        return { verified: false, error: `GUI_SAVE failed: File check error for "${checkPath}": ${err.message}` };
+      }
     }
     return { verified: true };
   }
@@ -432,7 +474,8 @@ export async function executeNextStep(objectiveId, root = fsConfig.workspaceRoot
         throw new Error(approveRes.error || `Failed to launch application '${appId}'.`);
       }
       toolResult = {
-        success: true,
+        success: approveRes.success === true && approveRes.verified === true,
+        verified: approveRes.verified === true,
         applicationId: appId,
         requestId: launchReq.requestId,
         verification: approveRes.verification,
@@ -476,6 +519,36 @@ export async function executeNextStep(objectiveId, root = fsConfig.workspaceRoot
       toolResult = {
         success: true,
         textLength: text.length,
+        verification: approveRes.verification,
+        result: approveRes.result
+      };
+    } else if (t === 'GUI_SAVE') {
+      const targetPath = action.path || action.filePath || 'Desktop/EVO_Save_Test.txt';
+      const filename = action.filename || targetPath.split('/').pop();
+      const expectedContent = action.expectedContent !== undefined ? action.expectedContent : action.content;
+      const target = { path: targetPath, filename, expectedContent };
+
+      const saveReq = computerInteractionService.requestGuiSave(target, { objectiveId: obj.id });
+      if (!saveReq.success) {
+        throw new Error(saveReq.error || 'Failed to stage GUI save request.');
+      }
+      const isTestEnv = process.env.NODE_ENV === 'test' || globalThis.EVO_TEST_MODE === true;
+      const approveRes = await computerInteractionService.approveGuiSave(saveReq.requestId, {
+        objectiveId: obj.id,
+        mock: isTestEnv,
+        mockTitle: isTestEnv ? `${filename} - Mousepad` : undefined,
+        mockGuiSaved: isTestEnv ? true : undefined,
+        mockDirtyCleared: isTestEnv ? true : undefined
+      });
+      if (!approveRes.success) {
+        throw new Error(approveRes.error || 'Failed to execute GUI save operation.');
+      }
+      toolResult = {
+        success: true,
+        guiSaved: approveRes.guiSaved,
+        dirtyCleared: approveRes.dirtyCleared,
+        savedTitle: approveRes.savedTitle,
+        path: approveRes.path,
         verification: approveRes.verification,
         result: approveRes.result
       };

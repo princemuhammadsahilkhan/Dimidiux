@@ -23,9 +23,12 @@ import { computerAutonomyService } from './computerAutonomyService.js';
 import { autonomyScopePlannerService } from './autonomyScopePlannerService.js';
 import { computerRecoveryService } from './computerRecoveryService.js';
 import { evolutionService } from './evolutionService.js';
+import { resolveApplicationByNameSync } from './desktopApplicationDiscoveryService.js';
 import { isObjectiveProcessedForEvolution } from './capabilityStore.js';
+import { resolveSafePath } from './filesystemTool.js';
+import fs from 'fs';
 
-export const ALLOWED_STEP_TYPES = ['OBSERVE', 'LAUNCH_APPLICATION', 'CLICK', 'TEXT_INPUT', 'VERIFY'];
+export const ALLOWED_STEP_TYPES = ['OBSERVE', 'LAUNCH_APPLICATION', 'CLICK', 'TEXT_INPUT', 'GUI_SAVE', 'write_file', 'VERIFY', 'CLOSE_WINDOW', 'CLOSE_APPLICATION'];
 export const STEP_STATUSES = [
   'PENDING', 'READY', 'AWAITING_APPROVAL', 'APPROVED', 'EXECUTING',
   'VERIFYING', 'COMPLETED', 'REJECTED', 'STALE', 'FAILED', 'CANCELLED'
@@ -63,28 +66,77 @@ export function planComputerTask(objective) {
   }
 
   // Step 2: Application Launch if requested in goal
-  if (goalLower.includes('launch') || goalLower.includes('open') || goalLower.includes('editor') || goalLower.includes('calculator') || goalLower.includes('terminal')) {
-    let appId = 'app_text_editor';
-    let appName = 'Text Editor';
+  const isAppLaunchRequested = goalLower.includes('launch') || goalLower.includes('open') || goalLower.includes('editor') || 
+                               goalLower.includes('calculator') || goalLower.includes('terminal') || goalLower.includes('firefox') || 
+                               goalLower.includes('code') || goalLower.includes('file manager') || goalLower.includes('browser');
 
-    if (goalLower.includes('calculator')) {
-      appId = 'app_calculator';
-      appName = 'Calculator';
-    } else if (goalLower.includes('terminal')) {
-      appId = 'app_terminal';
-      appName = 'Terminal Console';
-    }
+  if (isAppLaunchRequested) {
+    const clauseSplits = objective.split(/\s*(?:,\s*then\s+|;\s*then\s+|\s+then\s+|\s+and\s+finally\s+|\s+and\s+then\s+|,\s*and\s+|\s+and\s+|,|\.)\s*/i).filter(Boolean);
 
-    steps.push({
-      stepId: `step_${stepIdx++}_launch`,
-      type: 'LAUNCH_APPLICATION',
-      description: `Launch allowlisted application '${appName}' (${appId})`,
-      dependencies: steps.length > 0 ? [steps[steps.length - 1].stepId] : [],
-      targetReference: { applicationId: appId, appName },
-      actionRequestId: null,
-      approvalRequired: true,
-      status: 'PENDING'
+    const requestedAppClauses = clauseSplits.filter(clause => {
+      const cLower = clause.toLowerCase().trim();
+      const isKeepOpen = cLower.includes('leave it open') || cLower.includes('keep it open') || cLower.includes("don't close") || cLower.includes('do not close') || cLower.startsWith('leave ') || cLower.startsWith('keep ');
+      const isCloseClause = cLower.startsWith('close ') || cLower === 'close';
+      if (isKeepOpen || isCloseClause) return false;
+
+      return cLower.includes('launch') || cLower.includes('open') || cLower.includes('start') ||
+             cLower.includes('editor') || cLower.includes('calculator') || cLower.includes('terminal') ||
+             cLower.includes('firefox') || cLower.includes('code') || cLower.includes('file manager') ||
+             cLower.includes('browser') || cLower.includes('calc');
     });
+
+    const launchClauses = requestedAppClauses.length > 0 ? requestedAppClauses : [objective];
+
+    for (const clause of launchClauses) {
+      let resolvedApp = null;
+      try {
+        const res = resolveApplicationByNameSync(clause);
+        if (res && res.success && res.application) {
+          resolvedApp = res.application;
+        }
+      } catch (e) {}
+
+      let appId = resolvedApp ? resolvedApp.id : null;
+      let appName = resolvedApp ? resolvedApp.name : null;
+
+      if (!resolvedApp) {
+        const cLower = clause.toLowerCase();
+        if (cLower.includes('calculator') || cLower.includes('calc')) {
+          appId = 'app_calculator';
+          appName = 'Calculator';
+        } else if (cLower.includes('terminal')) {
+          appId = 'app_terminal';
+          appName = 'Terminal Console';
+        } else if (cLower.includes('text editor') || cLower.includes('editor')) {
+          appId = 'app_text_editor';
+          appName = 'Text Editor';
+        } else if (cLower.includes('file manager')) {
+          appId = 'thunar';
+          appName = 'File Manager';
+        } else if (cLower.includes('firefox')) {
+          appId = 'firefox';
+          appName = 'Firefox';
+        } else if (cLower.includes('code') || cLower.includes('visual studio code')) {
+          appId = 'code';
+          appName = 'Visual Studio Code';
+        }
+      }
+
+      if (!appId) {
+        throw new Error(`Planning Error: Application requested in '${clause}' could not be resolved.`);
+      }
+
+      steps.push({
+        stepId: `step_${stepIdx++}_launch`,
+        type: 'LAUNCH_APPLICATION',
+        description: `Launch ${resolvedApp ? 'discovered' : 'allowlisted'} application '${appName}' (${appId})`,
+        dependencies: steps.length > 0 ? [steps[steps.length - 1].stepId] : [],
+        targetReference: { applicationId: appId, appName, appDescriptor: resolvedApp },
+        actionRequestId: null,
+        approvalRequired: true,
+        status: 'PENDING'
+      });
+    }
   }
 
   // Step 3: Text Input if text entry is requested in goal
@@ -134,15 +186,16 @@ export function planComputerTask(objective) {
   const hasSaveIntent = goalLower.includes('save');
   let savePath = null;
   let saveContent = null;
+  let saveFilename = null;
 
   if (hasSaveIntent) {
     const fileMatch = objective.match(/save\s+(?:the\s+file\s+)?as\s+['"]?([a-zA-Z0-9_\-\.]+)['"]?/i) ||
                       objective.match(/as\s+['"]?([a-zA-Z0-9_\-\.]+\.[a-zA-Z0-9]+)['"]?/i) ||
                       objective.match(/named\s+['"]?([a-zA-Z0-9_\-\.]+)['"]?/i);
-    const filename = fileMatch ? fileMatch[1] : 'EVO_Computer_Test.txt';
-    savePath = filename;
+    saveFilename = fileMatch ? fileMatch[1] : 'EVO_Computer_Test.txt';
+    savePath = saveFilename;
     if (goalLower.includes('desktop')) {
-      savePath = filename.startsWith('Desktop/') ? filename : `Desktop/${filename}`;
+      savePath = saveFilename.startsWith('Desktop/') ? saveFilename : `Desktop/${saveFilename}`;
     }
 
     const textMatch = objective.match(/["']([^"']+)["']/);
@@ -150,22 +203,70 @@ export function planComputerTask(objective) {
 
     steps.push({
       stepId: `step_${stepIdx++}_save`,
-      type: 'write_file',
-      description: `Save file as '${savePath}'`,
+      type: 'GUI_SAVE',
+      description: `Save file as '${savePath}' via GUI save operation`,
       dependencies: steps.length > 0 ? [steps[steps.length - 1].stepId] : [],
       targetReference: {
         path: savePath,
+        filename: saveFilename,
         content: saveContent,
         expectedContent: saveContent
       },
       action: {
-        type: 'write_file',
+        type: 'GUI_SAVE',
         path: savePath,
+        filename: saveFilename,
         content: saveContent,
         expectedContent: saveContent
       },
       actionRequestId: null,
-      approvalRequired: false,
+      approvalRequired: true,
+      status: 'PENDING'
+    });
+  }
+
+  // Step 5.5: Explicit Close Intent vs Keep Open Intent
+  const isKeepOpenRequested = goalLower.includes('leave it open') ||
+                              goalLower.includes('keep it open') ||
+                              goalLower.includes("don't close") ||
+                              goalLower.includes('do not close') ||
+                              /leave\s+[a-z0-9_\-\s]+\s+(?:open|running)/i.test(objective) ||
+                              /keep\s+[a-z0-9_\-\s]+\s+open/i.test(objective);
+
+  const isExplicitCloseRequested = !isKeepOpenRequested && (
+    goalLower.includes('close firefox') ||
+    goalLower.includes('close code') ||
+    goalLower.includes('close visual studio code') ||
+    goalLower.includes('close file manager') ||
+    goalLower.includes('close thunar') ||
+    goalLower.includes('close calculator') ||
+    goalLower.includes('close editor') ||
+    goalLower.includes('close mousepad') ||
+    goalLower.includes('close terminal') ||
+    goalLower.includes('close window') ||
+    goalLower.includes('close application') ||
+    /,\s*then\s+close\s+/i.test(objective) ||
+    /\s+and\s+then\s+close\s+/i.test(objective) ||
+    /\s+then\s+close\s+/i.test(objective) ||
+    /\bclose\b/i.test(objective)
+  );
+
+  if (isExplicitCloseRequested) {
+    let closeTarget = null;
+    const closeMatch = objective.match(/close\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+)/i);
+    if (closeMatch) {
+      closeTarget = closeMatch[1].trim();
+    }
+
+    steps.push({
+      stepId: `step_${stepIdx++}_close`,
+      type: 'CLOSE_APPLICATION',
+      description: `Close task-owned application '${closeTarget || 'application'}'`,
+      dependencies: steps.length > 0 ? [steps[steps.length - 1].stepId] : [],
+      targetReference: { target: closeTarget, applicationId: closeTarget },
+      action: { type: 'CLOSE_APPLICATION', target: closeTarget, applicationId: closeTarget },
+      actionRequestId: null,
+      approvalRequired: true,
       status: 'PENDING'
     });
   }
@@ -176,6 +277,8 @@ export function planComputerTask(objective) {
     verifyAction.filePath = savePath;
     verifyAction.path = savePath;
     verifyAction.expectedContent = saveContent;
+    verifyAction.isGuiSaveTask = true;
+    verifyAction.filename = saveFilename;
   }
 
   steps.push({
@@ -192,7 +295,9 @@ export function planComputerTask(objective) {
 
   return {
     objective,
-    steps
+    steps,
+    disableHousekeeping: isKeepOpenRequested,
+    explicitCloseRequested: isExplicitCloseRequested
   };
 }
 
@@ -212,11 +317,16 @@ export class ComputerTaskService {
     }
 
     // Validate supported step types
+    let planRes = { steps: [], disableHousekeeping: false, explicitCloseRequested: false };
+    try {
+      planRes = planComputerTask(objective);
+    } catch (e) {}
+
     let plannedSteps;
     try {
       plannedSteps = options.steps && Array.isArray(options.steps)
         ? options.steps
-        : planComputerTask(objective).steps;
+        : planRes.steps;
     } catch (err) {
       throw new Error(err.message);
     }
@@ -241,7 +351,9 @@ export class ComputerTaskService {
       updatedAt: new Date().toISOString(),
       beforeObservationId: null,
       afterObservationId: null,
-      verification: null
+      verification: null,
+      disableHousekeeping: options.disableHousekeeping !== undefined ? Boolean(options.disableHousekeeping) : Boolean(planRes.disableHousekeeping),
+      explicitCloseRequested: options.explicitCloseRequested !== undefined ? Boolean(options.explicitCloseRequested) : Boolean(planRes.explicitCloseRequested)
     };
 
     this.tasks.push(task);
@@ -366,8 +478,8 @@ export class ComputerTaskService {
     // Step 2: LAUNCH_APPLICATION
     if (currentStep.type === 'LAUNCH_APPLICATION' && (currentStep.status === 'READY' || currentStep.status === 'PENDING')) {
       currentStep.status = 'READY';
-      const targetAppId = currentStep.targetReference?.applicationId || 'app_text_editor';
-      const launchReq = applicationControlService.requestApplicationLaunch(targetAppId, { objectiveId: taskId });
+      const targetApp = currentStep.targetReference?.appDescriptor || currentStep.targetReference?.applicationId || currentStep.action?.applicationId || currentStep.action?.target || currentStep.action?.path || 'app_text_editor';
+      const launchReq = applicationControlService.requestApplicationLaunch(targetApp, { objectiveId: taskId });
 
       if (!launchReq.success) {
         currentStep.status = 'FAILED';
@@ -432,13 +544,58 @@ export class ComputerTaskService {
       return await this.checkScopeAndAutoExecute(task, currentStep);
     }
 
+    // Step 4.5: GUI_SAVE
+    if (currentStep.type === 'GUI_SAVE' && (currentStep.status === 'READY' || currentStep.status === 'PENDING')) {
+      currentStep.status = 'READY';
+      currentStep.beforeObservation = desktopObservationService.getDesktopObservation({ audit: false });
+      const target = currentStep.targetReference || { path: 'Desktop/EVO_Save_Test.txt' };
+      const saveReq = computerInteractionService.requestGuiSave(target, { objectiveId: taskId, observation: currentStep.beforeObservation });
+
+      if (!saveReq.success) {
+        currentStep.status = 'FAILED';
+        currentStep.result = saveReq.error;
+        task.status = 'FAILED';
+        return task;
+      }
+
+      currentStep.actionRequestId = saveReq.requestId;
+      currentStep.status = 'AWAITING_APPROVAL';
+      task.status = 'IN_PROGRESS';
+      task.updatedAt = new Date().toISOString();
+      return await this.checkScopeAndAutoExecute(task, currentStep);
+    }
+
+    // Step 4.8: CLOSE_WINDOW / CLOSE_APPLICATION
+    if ((currentStep.type === 'CLOSE_WINDOW' || currentStep.type === 'CLOSE_APPLICATION') && (currentStep.status === 'READY' || currentStep.status === 'PENDING')) {
+      currentStep.status = 'READY';
+      currentStep.actionRequestId = `close_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      currentStep.status = 'AWAITING_APPROVAL';
+      task.status = 'IN_PROGRESS';
+      task.updatedAt = new Date().toISOString();
+      return await this.checkScopeAndAutoExecute(task, currentStep);
+    }
+
     // Step 5: VERIFY
     if (currentStep.type === 'VERIFY' && (currentStep.status === 'READY' || currentStep.status === 'PENDING')) {
       currentStep.status = 'COMPLETED';
-      const verifyRes = this.verifyComputerTask(taskId);
+      const verifyRes = await this.verifyComputerTask(taskId);
       currentStep.result = verifyRes;
-      task.status = 'COMPLETED';
+      task.status = verifyRes.verified ? 'COMPLETED' : 'FAILED';
       task.updatedAt = new Date().toISOString();
+
+      // Trigger automatic housekeeping cleanup for task-owned resources if verified & not disabled
+      if (task.status === 'COMPLETED' && !task.disableHousekeeping && !task.explicitCloseRequested) {
+        try {
+          const taskResources = taskOwnershipRegistry.getTaskOwnedResources(taskId);
+          const evoOwned = taskResources.filter(r => r.isPreExisting === false);
+          if (evoOwned.length > 0) {
+            const cleanupRes = await applicationControlService.closeApplication(null, { taskId });
+            task.housekeepingCleanup = cleanupRes;
+          }
+        } catch (e) {
+          task.housekeepingCleanup = { success: false, verified: false, error: e.message };
+        }
+      }
 
       // Record final task learning evidence
       this.recordTaskLearning(task);
@@ -537,13 +694,34 @@ export class ComputerTaskService {
 
       execResult = await computerInteractionService.approveTextInput(step.actionRequestId, options);
     }
+    // Execute GUI Save
+    else if (step.type === 'GUI_SAVE') {
+      step.status = 'EXECUTING';
+      execResult = await computerInteractionService.approveGuiSave(step.actionRequestId, options);
+    }
+    // Execute CLOSE_WINDOW
+    else if (step.type === 'CLOSE_WINDOW') {
+      step.status = 'EXECUTING';
+      const targetWin = step.targetReference?.windowId || step.targetReference?.target || step.action?.windowId;
+      execResult = await applicationControlService.closeWindow(targetWin, { taskId, objectiveId: taskId });
+    }
+    // Execute CLOSE_APPLICATION
+    else if (step.type === 'CLOSE_APPLICATION') {
+      step.status = 'EXECUTING';
+      const targetApp = step.targetReference?.applicationId || step.targetReference?.target || step.action?.applicationId || step.action?.target;
+      execResult = await applicationControlService.closeApplication(targetApp, { taskId, objectiveId: taskId });
+    }
 
     // Step verification & post-action observation
     step.status = 'VERIFYING';
     const afterObs = desktopObservationService.getDesktopObservation({ audit: false });
     task.afterObservationId = afterObs.observationId;
 
-    if (execResult && execResult.success && execResult.verified !== false) {
+    const isStepVerified = (step.type === 'LAUNCH_APPLICATION' || step.type === 'CLOSE_WINDOW' || step.type === 'CLOSE_APPLICATION')
+      ? Boolean(execResult && execResult.success === true && execResult.verified === true)
+      : Boolean(execResult && execResult.success && execResult.verified !== false);
+
+    if (isStepVerified) {
       step.status = 'COMPLETED';
       step.result = execResult;
 
@@ -690,16 +868,92 @@ export class ComputerTaskService {
     const completedSteps = task.steps.filter((s) => s.status === 'COMPLETED').length;
     const totalSteps = task.steps.length;
 
-    const verified = completedSteps === totalSteps;
+    let verified = completedSteps === totalSteps;
+    let details = verified
+      ? `Computer task '${task.objective}' verified successfully across ${completedSteps} steps.`
+      : `Computer task incomplete: ${completedSteps} of ${totalSteps} steps completed.`;
+
+    // Check if task involved GUI Save
+    const guiSaveStep = task.steps.find((s) => s.type === 'GUI_SAVE' || s.action?.type === 'GUI_SAVE');
+    const isSaveTask = Boolean(guiSaveStep) || task.objective.toLowerCase().includes('save');
+
+    if (isSaveTask) {
+      const saveStep = guiSaveStep || task.steps.find((s) => s.targetReference?.path || s.action?.path);
+      const targetPath = saveStep?.targetReference?.path || saveStep?.action?.path || 'Desktop/EVO_Save_Test.txt';
+      const expectedContent = saveStep?.targetReference?.expectedContent !== undefined
+        ? saveStep.targetReference.expectedContent
+        : (saveStep?.action?.expectedContent !== undefined ? saveStep.action.expectedContent : saveStep?.targetReference?.content);
+      const filename = saveStep?.targetReference?.filename || targetPath.split('/').pop();
+
+      // 1. Filesystem check
+      try {
+        const resolvedPath = resolveSafePath(targetPath);
+        if (!fs.existsSync(resolvedPath)) {
+          verified = false;
+          details = `GUI save verification failed: Target file '${targetPath}' does not exist on disk.`;
+        } else if (expectedContent !== undefined && expectedContent !== null) {
+          const actualContent = fs.readFileSync(resolvedPath, 'utf-8');
+          if (actualContent.trim() !== String(expectedContent).trim()) {
+            verified = false;
+            details = `GUI save verification failed: Content mismatch on disk. Expected '${expectedContent}', got '${actualContent.trim()}'.`;
+          }
+        }
+      } catch (e) {
+        verified = false;
+        details = `GUI save verification failed: Filesystem read error: ${e.message}`;
+      }
+
+      // 2. Editor Document & Window State Verification
+      if (verified) {
+        let dirtyMarkerPresent = false;
+        let titleContainsFilename = false;
+
+        const openWins = currentObs.windows || [];
+        const activeApp = currentObs.activeApplication;
+
+        const targetWin = openWins.find((w) =>
+          w.title && (w.title.includes('Mousepad') || w.title.includes('Editor') || w.title.includes(filename))
+        ) || (activeApp ? { title: activeApp.title } : null);
+
+        const stepExecResult = saveStep?.result;
+        const savedTitleFromStep = stepExecResult?.savedTitle || stepExecResult?.verification?.savedTitle;
+
+        const evalTitle = savedTitleFromStep || (targetWin ? targetWin.title : '');
+
+        if (evalTitle) {
+          if (evalTitle.includes('*') || evalTitle.startsWith('*')) {
+            dirtyMarkerPresent = true;
+          }
+          if (evalTitle.toLowerCase().includes(filename.toLowerCase())) {
+            titleContainsFilename = true;
+          }
+        }
+
+        if (dirtyMarkerPresent) {
+          verified = false;
+          details = `GUI save verification failed: Application document state is dirty (unsaved marker '*' present in title '${evalTitle}').`;
+        } else if (evalTitle && !titleContainsFilename) {
+          verified = false;
+          details = `GUI save verification failed: Application window title '${evalTitle}' does not correspond to saved filename '${filename}'.`;
+        } else if (!saveStep || saveStep.status !== 'COMPLETED' || (stepExecResult && stepExecResult.guiSaved === false)) {
+          verified = false;
+          details = `GUI save verification failed: GUI save step was not executed and verified through the text editor application UI.`;
+        }
+      }
+    }
+
+    if (!verified) {
+      task.status = 'FAILED';
+    }
+
     const verification = {
       verified,
+      state: verified ? 'COMPLETED' : 'NOT_FULLY_VERIFIED',
       completedSteps,
       totalSteps,
       beforeObservationId: task.beforeObservationId,
       afterObservationId: currentObs.observationId,
-      details: verified
-        ? `Computer task '${task.objective}' verified successfully across ${completedSteps} steps.`
-        : `Computer task incomplete: ${completedSteps} of ${totalSteps} steps completed.`
+      details
     };
 
     task.verification = verification;
